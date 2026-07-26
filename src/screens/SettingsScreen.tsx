@@ -208,15 +208,19 @@ export default function SettingsScreen() {
   // sherpa(다국어 단일 모델)는 화자 목록이 언어와 무관 — 필터 없이 전체.
   const langVoices = isSherpa ? sherpaVoices : isEdge ? edgeLangVoices : systemLangVoices;
   const selectedVoiceId = isSherpa ? s.sherpaVoiceId : isEdge ? s.edgeVoiceId : s.voiceId;
-  const selectVoice = (id?: string) =>
+  const selectVoice = (id?: string) => {
     s.set(isSherpa ? { sherpaVoiceId: id } : isEdge ? { edgeVoiceId: id } : { voiceId: id });
+    // 재생 중이면 옛 화자로 쌓인 선행합성을 버리고 새 화자로 다시 채운다(캐시 키가 통째로
+    // 바뀌므로 안 하면 다음 문장마다 즉석 재합성 대기 — 교차검증 지적 2026-07-26).
+    usePlayer.getState().refreshVoice();
+  };
   // 대사 음성(멀티보이스) — 엔진별 별도 키. 미지정(undefined) = 자동 대비 음성.
   const selectedDialogueVoiceId = isSherpa
     ? s.sherpaDialogueVoiceId
     : isEdge
       ? s.edgeDialogueVoiceId
       : s.dialogueVoiceId;
-  const selectDialogueVoice = (id?: string) =>
+  const selectDialogueVoice = (id?: string) => {
     s.set(
       isSherpa
         ? { sherpaDialogueVoiceId: id }
@@ -224,6 +228,8 @@ export default function SettingsScreen() {
           ? { edgeDialogueVoiceId: id }
           : { dialogueVoiceId: id },
     );
+    usePlayer.getState().refreshVoice();
+  };
 
   const sampleText = () =>
     s.language.startsWith('ko')
@@ -473,7 +479,7 @@ export default function SettingsScreen() {
         {isEdge
           ? ' 고품질 온라인(Edge)은 2×까지 원음 그대로이고, 그 이상은 소리가 점점 거칠어질 수 있습니다.'
           : isSherpa
-            ? ' 고품질 오프라인은 3×까지 원음 그대로이고, 그 이상은 소리가 점점 거칠어질 수 있습니다.'
+            ? ' 고품질 오프라인은 2.5×까지 원음 그대로이고, 그 이상은 소리가 점점 거칠어질 수 있습니다.'
             : ' 아주 빠른 속도의 또렷함은 기기 음성 품질을 따릅니다.'}
       </Text>
       <Row

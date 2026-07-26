@@ -4,7 +4,7 @@ import { getEngine, systemEngine } from '../tts';
 import { sherpaStats, resetSherpaStats } from '../tts/sherpa/stats';
 import { sherpaModelSpeed, sherpaTrimEnabled, sherpaRubato, rubatoActive } from '../tts/sherpa/rate';
 import { leadPadRateBucket } from '../tts/sherpa/smartSpeed';
-import { contrastEdgeVoice, genderEdgeVoice } from '../tts/edge/voices';
+import { contrastEdgeVoice, genderEdgeVoice, defaultEdgeVoice, EDGE_VOICES } from '../tts/edge/voices';
 import { splitDialogue, type DialogueSegment } from '../lib/dialogue';
 import {
   guessDialogueGenders,
@@ -20,6 +20,7 @@ import {
   setRemoteHandlers,
 } from '../lib/mediaSession';
 import { promptBgReliabilityOnce } from '../lib/batteryOpt';
+import { armWatchdog, disarmWatchdog, noteProgress } from '../lib/playbackWatchdog';
 import { sentenceGapMs } from '../lib/pacing';
 import { playGap, GAP_MIN_MS } from '../lib/gapPlayer';
 import { startBgSound } from '../lib/bgSound';
@@ -88,6 +89,8 @@ export type PlayerState = {
   seek: (index: number) => void;
   // 재생 중 배속 변경 반영: 엔진이 라이브 적용 가능하면 끊김 0, 아니면 현재 문장 재발화.
   applyRate: (rate: number) => void;
+  // 음성·화자 설정이 바뀌었을 때 선행합성 큐를 새 설정으로 다시 채운다(재생 중일 때만).
+  refreshVoice: () => void;
   unload: () => void;
 };
 
@@ -157,14 +160,43 @@ function segsOf(sentences: string[]): DialogueSegment[][] {
 // 문장별 대사 화자 성별(지문 단서 추정) — segsOf 와 같은 문서 단위 메모. 재생·prefetch·
 // 워밍업이 전부 이 값을 쓰므로 세 경로의 캐시 키가 항상 일치한다(speakParams 경고 참조).
 let genderCacheSrc: string[] | null = null;
+let genderCacheBase: SpeakerGender | null = null;
 let genderCache: (SpeakerGender | null)[] = [];
+
+// 기본(지문) 화자의 성별 — 실제로 발화할 엔진 기준. 대사 미상 폴백의 방향을 정한다.
+// sherpa sid 0~4=여/5~9=남(F0 실측, speakerGender.ts), Edge 는 큐레이션 목록의 성별 라벨.
+// 시스템 엔진은 기기 음성이라 알 수 없다 — 여성 가정(한국어 기본 TTS 관행)이 폴백.
+function baseSpeakerGender(): SpeakerGender {
+  const s = useSettings.getState();
+  if (s.engineId === 'sherpa') {
+    const parsed = Number.parseInt(s.sherpaVoiceId || '0', 10);
+    const sid = Number.isInteger(parsed) && parsed >= 0 && parsed <= 9 ? parsed : 0;
+    return sid <= 4 ? 'female' : 'male';
+  }
+  if (s.engineId === 'edge') {
+    const id = (s.edgeVoiceId || defaultEdgeVoice(s.language)).split('#')[0];
+    const v = EDGE_VOICES.find((x) => x.id === id);
+    if (v?.name.includes('(남')) return 'male';
+    return 'female';
+  }
+  return 'female';
+}
+
 function gendersOf(sentences: string[]): (SpeakerGender | null)[] {
-  if (genderCacheSrc !== sentences) {
+  // 기본 화자가 바뀌면(설정에서 음성/엔진 변경) 미상 런의 교대 시드가 달라지므로 재계산.
+  const base = baseSpeakerGender();
+  if (genderCacheSrc !== sentences || genderCacheBase !== base) {
     genderCacheSrc = sentences;
+    genderCacheBase = base;
     // 2패스(문서 단위): 대사만 있는 문장은 앞뒤 지문 문장의 단서까지 본다(v1.25.3).
     // paraStarts 는 이 문장 배열과 항상 짝(load 에서 함께 세팅) — 문단 경계를 넘는 성별
     // 전파를 막는 데 쓴다. 스토어 초기화 이후에만 불리므로 getState() 안전.
-    genderCache = guessDialogueGenders(sentences, usePlayer.getState().paraStarts);
+    // fallbackFirst(v1.28.0): 단서가 전혀 없는 대화 런은 "기본 화자의 반대 성별"부터
+    // 교대로 채운다 — 지문은 기본 화자가 읽으므로 대사 첫 턴을 반대로 두면 대비가 살고,
+    // 이어지는 턴이 번갈아 들려 남↔여 교환이 한 목소리로 뭉개지지 않는다.
+    genderCache = guessDialogueGenders(sentences, usePlayer.getState().paraStarts, {
+      fallbackFirst: base === 'male' ? 'female' : 'male',
+    });
   }
   return genderCache;
 }
@@ -243,10 +275,64 @@ export const usePlayer = create<PlayerState>((set, get) => {
     }
   };
 
+  // 화면 꺼짐 낭독 정체 복구(v1.28.0 — playbackWatchdog.ts). 연속 실패가 쌓이면 포기하고
+  // 사용자에게 알린다(무한 재시도로 배터리를 태우지 않게). 정상 진행 시 0 으로 리셋.
+  let stallRecoveries = 0;
+  // 현재 발화 중인 세그먼트 위치(정체 복구용 — speakSegment 가 갱신). epoch 로 스테일 판정.
+  let resumeSegment: { epoch: number; si: number; count: number; run: (si: number) => void } | null =
+    null;
+  const recoverFromStall = () => {
+    const st = get();
+    if (!st.playing) return;
+    if (stallRecoveries >= 3) {
+      // 세 번 되살려도 계속 멈춘다 = 코드로 못 넘는 환경 문제(도즈·배터리 관리). 워치독만
+      // 끄고 두면 UI 는 "재생 중"인데 소리는 없고 포그라운드 서비스만 전력을 먹는다
+      // (교차검증 codex 2026-07-26) — 실제로 재생을 내리고 알린다.
+      stallRecoveries = 0;
+      activeEngine.stop();
+      set({
+        playing: false,
+        notice:
+          '화면이 꺼진 동안 낭독이 멈춰 재생을 중단했습니다 — 설정에서 배터리 최적화 예외를 켜 주시면 안정적으로 이어집니다.',
+      });
+      stopMediaSession(); // 워치독 해제(disarm)도 여기서 중앙 처리된다
+      return;
+    }
+    stallRecoveries++;
+    if (pendingGap) {
+      // 쉼(무음 재생)의 완료 신호가 유실된 것 — 예약돼 있던 다음 문장으로 진행.
+      const next = pendingGap.nextIndex;
+      clearPendingGap(false);
+      set({ index: next, wordStart: 0, wordLen: 0 });
+    } else if (activeEngine.finishedButIdle?.()) {
+      // ⚠️ 급소(교차검증 codex CRITICAL 2026-07-26): 오디오는 끝까지 재생됐는데 완료 통지만
+      // 유실된 경우다 — 이게 바로 이 워치독이 노리는 대표 장애다. 여기서 현재 문장을 다시
+      // 발화하면 "다 읽은 문장을 처음부터 반복"이 되어, 고치려던 것보다 나쁜 증상을 만든다.
+      // 이 발화 단위를 정상 완주한 것으로 보고 다음 단위로 넘긴다.
+      const rs = resumeSegment;
+      if (rs && rs.epoch === epoch && rs.si < rs.count - 1) {
+        // 같은 문장의 남은 세그먼트가 있다(지문 뒤 대사 등) — 문장을 건너뛰지 않는다.
+        rs.run(rs.si + 1);
+        return;
+      }
+      if (st.index >= st.sentences.length - 1) {
+        // 마지막 문장이었다 = 책 끝. 정상 종료 경로와 같게 정리한다.
+        activeEngine.stop();
+        set({ playing: false, wordStart: 0, wordLen: 0 });
+        stopMediaSession();
+        return;
+      }
+      set({ index: st.index + 1, wordStart: 0, wordLen: 0 });
+    }
+    // 그 외(재생이 중간에서 죽음·시작 자체가 안 됨)는 현재 문장을 다시 발화한다.
+    speakCurrent();
+  };
+
   const speakCurrent = () => {
     clearPendingGap(false); // 새 발화가 예약된 쉼을 대체(수동 이동·재발화 등)
     const { sentences, index, docId } = get();
     if (!sentences.length || index < 0 || index >= sentences.length) return;
+    noteProgress(); // 문장 전환 자체가 진행 — 워치독 시계를 되돌린다
 
     // 서킷 열림(연속 실패 백오프) 중엔 해당 엔진을 건너뛰고 시스템으로 — 백오프가 끝나면 자동 재시도.
     const settings = useSettings.getState();
@@ -265,6 +351,18 @@ export const usePlayer = create<PlayerState>((set, get) => {
     activeEngine = engine;
     const myEpoch = ++epoch;
     set({ wordStart: 0, wordLen: 0, playing: true });
+    // 정체 감시 무장. 프로브는 "지금 발화 중인 엔진" 기준으로 매번 다시 건다(엔진 전환·
+    // 시스템 폴백 후에도 올바른 대상을 본다). 재생기 자체가 없는 시스템 TTS 는 감시 대상이
+    // 아니므로 progressMs/busy 미구현 = 항상 준비 중으로 취급해 오발동을 막는다.
+    armWatchdog(
+      {
+        progressMs: () => activeEngine.progressMs?.() ?? null,
+        // 프로브 미구현 엔진(시스템 TTS)은 "항상 준비 중"으로 둬 워치독이 손대지 않게 한다.
+        // busy 만 미구현인 엔진이 생겨도 안전한 쪽(true)으로 기운다.
+        busy: () => (activeEngine.progressMs ? (activeEngine.busy?.() ?? true) : true),
+      },
+      recoverFromStall,
+    );
     // 백그라운드 유지 + 잠금화면 컨트롤(무음 앵커). 문장마다 불려도 무해(멱등).
     startMediaSession(get().title);
     // 432Hz 배경 앰비언트(선택형) — 켜져 있으면 낭독 뒤에 은은히 깔린다(멱등). 정지는
@@ -284,6 +382,8 @@ export const usePlayer = create<PlayerState>((set, get) => {
     let fellBack = false;
 
     const advanceSentence = () => {
+      stallRecoveries = 0; // 문장을 온전히 끝냈다 = 파이프라인 정상
+      noteProgress();
       // 폴백 없이 문장을 완주했을 때만 연속 실패 카운터 리셋(문장 단위 의미 유지).
       // 세그먼트 성공마다 리셋하면 "지문 성공 + 대사 실패" 문장에서 카운터가 매번 0으로
       // 돌아가 서킷브레이커가 영원히 안 열린다 — 교차검증 발견 2026-07-06.
@@ -345,6 +445,11 @@ export const usePlayer = create<PlayerState>((set, get) => {
     };
 
     const speakSegment = (si: number) => {
+      // 정체 복구가 "다음 발화 단위"를 정확히 알 수 있게 현재 위치를 노출한다. 문장이 지문/
+      // 대사로 쪼개져 있으면(멀티보이스) 완료 통지 유실 시 문장 전체를 건너뛰는 게 아니라
+      // 남은 세그먼트부터 이어야 한다(교차검증 codex CRITICAL 2026-07-26 — 마지막 문장이면
+      // 책이 통째로 조기 종료됐다).
+      resumeSegment = { epoch: myEpoch, si, count: segs.length, run: speakSegment };
       const seg = segs[si];
       const engId = fellBack ? 'system' : engineId;
       const eng = fellBack ? systemEngine : engine;
@@ -511,6 +616,7 @@ export const usePlayer = create<PlayerState>((set, get) => {
 
     play: () => {
       if (!get().sentences.length) return;
+      stallRecoveries = 0; // 사용자가 직접 시작 = 정체 이력 초기화
       // 첫 재생 시 1회: 배경(화면 꺼짐) 낭독이 배터리 관리에 끊기지 않도록 최적화 예외를 안내.
       promptBgReliabilityOnce();
       speakCurrent();
@@ -544,6 +650,7 @@ export const usePlayer = create<PlayerState>((set, get) => {
     },
 
     next: () => {
+      stallRecoveries = 0; // 수동 조작이 통했다 = 파이프라인 정상
       clearPendingGap(false); // 수동 이동은 쉼을 취소(index 는 아래서 직접 지정)
       const { index, sentences, playing } = get();
       if (index >= sentences.length - 1) return;
@@ -556,6 +663,7 @@ export const usePlayer = create<PlayerState>((set, get) => {
     },
 
     prev: () => {
+      stallRecoveries = 0;
       clearPendingGap(false);
       const { index, sentences, playing } = get();
       if (index <= 0) return;
@@ -609,7 +717,20 @@ export const usePlayer = create<PlayerState>((set, get) => {
       get().seek(get().index);
     },
 
+    // 음성(화자) 변경은 캐시 키를 통째로 바꾼다 — 옛 voiceId 로 쌓아 둔 선행합성은 전부
+    // 미스가 되어, 그대로 두면 다음 문장마다 즉석 재합성 대기가 생긴다(배속 변경에서
+    // applyRate 가 cancelPending + warmUp 을 부르는 것과 같은 이유). 대사 화자 성별 배정도
+    // 기본 화자 성별에 따라 달라지므로(gendersOf) 여기서 함께 다시 채운다.
+    refreshVoice: () => {
+      if (!get().playing) return;
+      activeEngine.cancelPending?.();
+      // warmUp 은 오프라인(sherpa) 전용이라 Edge 에선 no-op — 그쪽은 재생 중 prefetch 루프가
+      // 다음 문장부터 새 화자로 알아서 채운다(문장마다 독립 연결이라 미리 깊게 쌓지 않는다).
+      warmUp(get().index + 1);
+    },
+
     seek: (i) => {
+      stallRecoveries = 0;
       clearPendingGap(false);
       const { sentences, playing } = get();
       const clamped = Math.max(0, Math.min(i, sentences.length - 1));

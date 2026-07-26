@@ -58,6 +58,10 @@ const MAX_CACHE = 4;
 // 네이티브 상태 이벤트 주기(ms). PiP(작은 창)에선 Android가 액티비티를 pause시켜 JS 타이머가
 // 얼어붙는다 — 이 이벤트는 액티비티 생명주기와 무관한 코루틴에서 계속 도착해 자막을 움직인다.
 const STATUS_UPDATE_MS = 80;
+// 워치독 프로브 상수(근거는 SherpaTtsEngine 의 동명 상수 주석).
+const END_EPSILON_S = 0.25;
+const END_RATIO = 0.9;
+const START_GRACE_MS = 8_000;
 
 // Edge(Read Aloud) 온라인 신경망 엔진. 문장 하나 = WebSocket 요청 하나(오디오+단어타이밍) →
 // 파일로 받아 expo-audio 로 재생, 재생위치를 폴링해 기존 onBoundary 콜백으로 단어 하이라이트.
@@ -85,6 +89,50 @@ export class EdgeTtsEngine implements TtsEngine {
   private pendingSynth: CacheEntry | null = null;
   // 선행 합성 캐시(key=voice|rate|lang|text)
   private cache = new Map<string, CacheEntry>();
+  // 이번 발화의 재생 시작 시도 시각 — busy() 의 "준비 중" 판정 상한 기준점.
+  private playStartedAt = 0;
+
+  // ── 워치독 프로브(playbackWatchdog.ts) — sherpa 와 동일 계약 ────────
+  /** 현재 재생 위치(ms). 상태 이벤트가 끊겨도 네이티브에서 직접 읽는다. */
+  progressMs(): number | null {
+    if (!this.player) return null;
+    try {
+      return Math.round((this.player.currentTime || 0) * 1000);
+    } catch {
+      return null;
+    }
+  }
+
+  /** 정상적인 준비 상태: 합성(WebSocket 왕복) 대기 · 버퍼링 · 재생 시작 직전.
+   *  근거는 SherpaTtsEngine.busy 주석과 동일(교차검증 codex 2026-07-26). */
+  busy(): boolean {
+    if (this.pendingSynth) return true;
+    const p = this.player;
+    if (!p) return false;
+    // 시작 대기에는 상한을 둔다 — 근거는 SherpaTtsEngine.busy 주석(무한 대기 시 워치독 무력화).
+    if (Date.now() - this.playStartedAt > START_GRACE_MS) return false;
+    try {
+      if (p.isBuffering) return true;
+      if (!p.playing && (p.currentTime || 0) <= 0) return true;
+    } catch {
+      /* 네이티브 읽기 실패 — progressMs 쪽 판정에 맡긴다 */
+    }
+    return false;
+  }
+
+  /** 끝까지 재생됐는데 완료 통지만 안 온 상태(TtsEngine.finishedButIdle 주석). */
+  finishedButIdle(): boolean {
+    const p = this.player;
+    if (!p) return false;
+    try {
+      const dur = p.duration || 0;
+      const pos = p.currentTime || 0;
+      if (dur <= 0 || pos <= 0 || p.playing) return false;
+      return pos >= Math.max(dur * END_RATIO, dur - END_EPSILON_S);
+    } catch {
+      return false;
+    }
+  }
 
   speak(text: string, params: SpeakParams, handlers: SpeakHandlers): void {
     const myGen = ++this.playGen;
@@ -158,6 +206,15 @@ export class EdgeTtsEngine implements TtsEngine {
   stop(): void {
     this.playGen++;
     this.teardownPlayback();
+    this.clearCache();
+  }
+
+  /** 선행 합성만 비운다(재생은 건드리지 않음) — 화자·배속이 바뀌어 옛 키의 캐시가 전부
+   *  미스가 될 때 호출한다. Edge 는 sherpa 와 달리 직렬 체인이 아니라 문장별 독립 연결이라
+   *  "미완료만" 구분할 실익이 없다 — 통째로 비우고 다음 prefetch 가 새 키로 다시 채운다.
+   *  (교차검증 codex 2026-07-26: 이게 없어 설정에서 Edge 화자를 바꿔도 옛 음성의 선행합성이
+   *   그대로 남아 refreshVoice 가 사실상 no-op 이었다.) */
+  cancelPending(): void {
     this.clearCache();
   }
 
@@ -358,6 +415,7 @@ export class EdgeTtsEngine implements TtsEngine {
     preloaded?: AudioPlayer,
   ): void {
     try {
+      this.playStartedAt = Date.now();
       this.currentUri = synth.uri;
       this.currentSsmlPct = edgeSsmlRatePct(params.rate);
       const boundaries = synth.boundaries;

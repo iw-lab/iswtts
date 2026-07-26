@@ -3,6 +3,7 @@ import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from 'expo-aud
 import { File, Paths } from 'expo-file-system';
 import { buildSilenceWav } from './silenceWav';
 import { stopBgSound } from './bgSound';
+import { tickWatchdog, disarmWatchdog } from './playbackWatchdog';
 
 // 백그라운드 낭독 유지 + 잠금화면 컨트롤의 핵심: "세션 앵커" 플레이어.
 //
@@ -116,6 +117,9 @@ function resolvePendingRemote(): boolean {
 function onAnchorStatus(playing: boolean): void {
   lastObservedPlaying = playing;
   if (playing) anchorReachedPlaying = true;
+  // 앵커는 재생 내내 도는 무음 루프이고 그 상태 이벤트는 화면이 꺼져도 도착한다(FGS 유지가
+  // 이 플레이어의 존재 이유). 그것을 시계 삼아 낭독 정체를 감시한다(playbackWatchdog.ts).
+  tickWatchdog();
   if (playing === desiredPlaying) {
     if (confirmTimer) {
       clearTimeout(confirmTimer);
@@ -131,7 +135,10 @@ function ensureAnchor(): AudioPlayer | null {
   if (anchor) return anchor;
   let p: AudioPlayer | null = null;
   try {
-    p = createAudioPlayer(ensureSilenceUri());
+    // updateInterval: 앵커의 상태 이벤트 주기 = 워치독의 시계 눈금(playbackWatchdog.ts).
+    // 1초면 정체 감지가 충분히 빠르고, 화면 꺼짐 중 JS 깨움도 초당 1회로 미미하다
+    // (자막 폴링 16.7회/초를 끈 이유와 같은 저울 — 그 100분의 1 이하).
+    p = createAudioPlayer(ensureSilenceUri(), { updateInterval: 1000 });
     p.loop = true;
     p.volume = 0;
     p.addListener('playbackStatusUpdate', (st: any) => {
@@ -224,6 +231,7 @@ export function startMediaSession(title: string): void {
 export function stopMediaSession(): void {
   desiredPlaying = false;
   stopBgSound(); // 배경 앰비언트도 함께 정지(모든 정지 경로가 이 함수를 거친다)
+  disarmWatchdog(); // 정지 상태를 "정체"로 오인해 되살리지 않게(같은 이유로 여기 중앙화)
   if (confirmTimer) {
     clearTimeout(confirmTimer);
     confirmTimer = null;

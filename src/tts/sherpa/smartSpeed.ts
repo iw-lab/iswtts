@@ -216,7 +216,11 @@ export function trimEdgeSilence(
 // 마침표 잔향과는 다른, 화자 고유의 날숨).
 // 규칙: **마지막 강프레임(피크의 30% 초과) 뒤**만 본다 — 발화 본체는 어떤 경우에도 건드리지
 // 않는다. 그 뒤 구간의 최대 레벨이 피크의 25%를 넘으면(= 진짜 여린 말끝) 그대로 두고,
-// 아니면 40ms 페이드로 눕힌다. Whisper 전사는 게이트 전후가 동일했다(말끝 삭제 아님).
+// 아니면 40ms 페이드로 눕힌다.
+// ❌ v1.27.3 당시의 결론 "Whisper 전사는 게이트 전후가 동일했다(말끝 삭제 아님)"는 **틀렸다**
+//    — v1.28.0 실측(아래 TAIL_VOICED_MAX 주석)이 반증했다. Whisper 는 언어모델 prior 로
+//    사라진 말끝을 복원해 버려 이 판정에 애초에 부적합했다(이 코드베이스의 mel-DTW 교훈과
+//    같은 함정). 파형에서 F0 를 직접 재는 방식으로 대체했다.
 const TAIL_FRAME_MS = 20;
 const TAIL_STRONG_REL = 0.3;
 const TAIL_GATE_REL = 0.25;
@@ -224,6 +228,80 @@ const TAIL_FADE_MS = 40;
 // 이보다 짧은 꼬리는 건드리지 않는다 — 종성 파열음(ㅂ·ㄷ·ㄱ)의 개방 버스트가 딱 이 길이대라
 // 무차별 페이드는 말끝 자음을 깎는다(교차검증 codex 경고). 화자 날숨은 60ms 이상 이어진다.
 const TAIL_MIN_MURMUR_MS = 60;
+// ⚠️ v1.28.0 안전장치(사용자 보고 2026-07-26 "아직도 문자 끝이 씹히고 한 글자를 넘어간다").
+// v1.27.3의 레벨 전용 판정은 **정상 낭독의 34%에서 발동해 그중 3분의 2가 말끝 유성음을
+// 잘랐다**(실측 90건 = 문장 30 × sid 0/1/6, tail_rule.py): 삭제 구간에서 F0 66~315Hz의
+// 성대 진동이 검출됐고 최대 310ms(음절 하나 이상)가 사라졌다. 원래 표적이던 sid 1·6뿐
+// 아니라 지문 화자 sid 0에서도 유성비 1.00으로 발동했다.
+// 진짜 원인: 한국어 문장은 끝으로 갈수록 음이 낮아진다(하강 억양) — 마지막 음절 RMS 가
+// 문장 피크의 30% 아래로 떨어지는 일이 흔한데, 레벨만 보는 판정은 그 음절을 "잔향"으로
+// 오인한다. 레벨은 날숨과 여린 말끝을 가르지 못한다.
+// 해결: 잘라낼 후보 구간에 **성대 진동(F0)이 있으면 말소리** — 게이트를 포기한다. 날숨은
+// 무성 마찰음이라 자기상관 피크가 서지 않는다(실측: 날숨 후보 11건 전원 유성비 0.00~0.25,
+// 말끝 20건은 0.30~1.00). 문턱 0.1 = 그 사이의 넓은 골에 둬 오검출을 양쪽으로 막는다.
+const TAIL_VOICED_MAX = 0.1;
+// 삭제 길이 상한 — 화자 날숨 실측은 40~100ms(v1.27.3). 그보다 긴 꼬리는 말끝일 확률이
+// 높아 아예 대상에서 뺀다(유성 판정의 이중 방어선).
+const TAIL_MAX_MURMUR_MS = 120;
+// 유성 판정용 다운샘플 배수. 44.1kHz → 11kHz 면 F0 상한(350Hz)의 30배 이상이라 자기상관
+// 분해능이 충분하고, 연산량은 1/16 로 준다(재생 중 선행합성마다 도는 코드 — smartSpeed.ts
+// 상단의 "JS 스레드 점유가 오디오·자막을 밀어낸다"와 같은 이유).
+const VOICED_DS = 4;
+const VOICED_F0_MIN = 60;
+const VOICED_F0_MAX = 350;
+const VOICED_WIN_MS = 40;
+const VOICED_HOP_MS = 20;
+const VOICED_AC_PEAK = 0.35; // 정규화 자기상관이 이 값을 넘으면 그 프레임은 유성
+
+/**
+ * 구간에 성대 진동(유성음)이 있는 프레임의 비율. 저비용 자기상관(다운샘플).
+ * 날숨·마찰음 = 0 에 가깝고, 모음·비음 = 0.3 이상(실측 근거는 TAIL_VOICED_MAX 주석).
+ */
+export function voicedRatio(samples: ArrayLike<number>, sampleRate: number): number {
+  const sr = sampleRate / VOICED_DS;
+  const n = Math.floor(samples.length / VOICED_DS);
+  const win = Math.round((sr * VOICED_WIN_MS) / 1000);
+  const hop = Math.max(1, Math.round((sr * VOICED_HOP_MS) / 1000));
+  if (win < 8 || n < win) return 0;
+  const y = new Float64Array(n);
+  for (let i = 0; i < n; i++) y[i] = samples[i * VOICED_DS];
+  const lagLo = Math.max(1, Math.floor(sr / VOICED_F0_MAX));
+  const lagHi = Math.min(win - 1, Math.floor(sr / VOICED_F0_MIN));
+  if (lagHi <= lagLo) return 0;
+  const a = new Float64Array(win); // 평균 제거한 프레임
+  const pre = new Float64Array(win + 1); // 제곱 누적합(구간 에너지 O(1) 조회)
+  let frames = 0;
+  let voiced = 0;
+  for (let s = 0; s + win <= n; s += hop) {
+    frames++;
+    let mean = 0;
+    for (let i = 0; i < win; i++) mean += y[s + i];
+    mean /= win;
+    for (let i = 0; i < win; i++) {
+      a[i] = y[s + i] - mean;
+      pre[i + 1] = pre[i] + a[i] * a[i];
+    }
+    if (pre[win] <= 1e-9) continue;
+    let best = 0;
+    for (let lag = lagLo; lag <= lagHi; lag++) {
+      const m = win - lag; // 겹치는 표본 수
+      let acc = 0;
+      for (let i = 0; i < m; i++) acc += a[i] * a[i + lag];
+      if (acc <= 0) continue;
+      // ⚠️ 정규화는 "겹치는 두 구간"의 에너지로 해야 한다(교차검증 codex 2026-07-26, 수치
+      // 검증 동반): 프레임 전체 에너지로 나누면 lag 가 클수록(= F0 가 낮을수록) 겹침이 줄어
+      // 값이 구조적으로 작아진다 — 완전한 60Hz 순음도 0.58 까지밖에 못 올라가 남성 화자의
+      // 저주파 말끝이 문턱(0.35) 근처로 내려앉는다. 그러면 이 함수가 막으려던 "말끝 절단"이
+      // 하필 저음 화자에서 되살아난다.
+      const e1 = pre[m] - pre[0];
+      const e2 = pre[win] - pre[lag];
+      const r = acc / Math.sqrt(e1 * e2 + 1e-12);
+      if (r > best) best = r;
+    }
+    if (best > VOICED_AC_PEAK) voiced++;
+  }
+  return frames ? voiced / frames : 0;
+}
 
 export function gateTailMurmur(samples: number[], sampleRate: number): number[] {
   const win = Math.max(1, Math.round((sampleRate * TAIL_FRAME_MS) / 1000));
@@ -253,8 +331,13 @@ export function gateTailMurmur(samples: number[], sampleRate: number): number[] 
     // 무음이 아니라 "들리는" 잔향만 센다(무음 꼬리는 원래 있는 것).
     if (rms[f] > peak * 0.02) murmurFrames = f - lastStrong;
   }
-  if (murmurFrames * TAIL_FRAME_MS < TAIL_MIN_MURMUR_MS) return samples;
+  const murmurMs = murmurFrames * TAIL_FRAME_MS;
+  if (murmurMs < TAIL_MIN_MURMUR_MS || murmurMs > TAIL_MAX_MURMUR_MS) return samples;
   const cut = (lastStrong + 1) * win;
+  // 성대 진동이 남아 있으면 말끝이다 — 자르지 않는다(TAIL_VOICED_MAX 주석의 실측 근거).
+  // 검사 범위는 "들리는 잔향" 구간만(그 뒤 무음은 판정에 무의미 + 유성비를 희석한다).
+  const murmurEnd = Math.min(samples.length, cut + Math.round((sampleRate * murmurMs) / 1000));
+  if (voicedRatio(samples.slice(cut, murmurEnd), sampleRate) > TAIL_VOICED_MAX) return samples;
   const fade = Math.min(samples.length - cut, Math.round((sampleRate * TAIL_FADE_MS) / 1000));
   const out = samples;
   for (let i = 0; i < fade; i++) out[cut + i] *= 1 - i / fade;

@@ -111,6 +111,14 @@ const SHORT_CAP_MAX_SPEECH_MS = 320;
 const SHORT_CAP_FLOOR_RATIO = 0.75;
 // 즉석 생성 플레이어의 재생 지연(ms) — 배속이 네이티브에 반영될 틈(playFile 주석).
 const PLAY_DEFER_MS = 24;
+// "끝까지 재생됐다"로 볼 잔여(초). 네이티브 위치 보고는 마지막 버퍼에서 duration 에 정확히
+// 닿지 않는 경우가 있어 여유를 둔다(finishedButIdle).
+const END_EPSILON_S = 0.25;
+// 짧은 오디오용 비율 기준 — 상수 여유만 쓰면 duration 이 0.25s 이하일 때 판정이 무너진다.
+const END_RATIO = 0.9;
+// 재생 시작을 "정상적으로 기다려 주는" 상한(ms). 이 시간을 넘도록 재생에 못 들어가면
+// 준비 중이 아니라 고장으로 보고 워치독에 넘긴다(busy 주석).
+const START_GRACE_MS = 8_000;
 // 낱자 없는 발화의 무음 길이(파일에 굽는 값 — 재생 스트레치로 배속 비례 축소).
 const SILENT_UTTERANCE_MS = 600;
 // 낱자(문자·숫자) 판정 — 무음 발화 분기(doSynthesize)용.
@@ -187,6 +195,8 @@ export class SherpaTtsEngine implements TtsEngine {
   // 재계산할 때 쓴다(compFor). 완급 값 자체를 저장하지 않는 이유: >3×에서 시작한 문장(comp
   // 게이트로 1)을 ≤3×로 내리면 저장값이 stale — 교차검증 codex CRITICAL 2026-07-20.
   private currentRubatoOn = false;
+  // 이번 발화의 재생 시작 시도 시각 — busy() 의 "준비 중" 판정에 상한을 두기 위한 기준점.
+  private playStartedAt = 0;
 
   speak(text: string, params: SpeakParams, handlers: SpeakHandlers): void {
     const myGen = ++this.playGen;
@@ -403,6 +413,56 @@ export class SherpaTtsEngine implements TtsEngine {
   // 큐 제거용(player.applyRate).
   cancelPending(): void {
     this.cancelUnfinished();
+  }
+
+  // ── 워치독 프로브(playbackWatchdog.ts) ────────────────────
+  /** 현재 재생 위치(ms). 화면이 꺼져 상태 이벤트가 끊겨도 이 값은 네이티브에서 직접 읽는다. */
+  progressMs(): number | null {
+    if (!this.player) return null;
+    try {
+      return Math.round((this.player.currentTime || 0) * 1000);
+    } catch {
+      return null;
+    }
+  }
+
+  /** 정상적인 준비 상태(정체 아님): 합성 대기 · 디코더 버퍼링 · 재생 시작 직전.
+   *  ⚠️ 버퍼링/시작 대기를 빼면 저사양 기기의 정상 prepare 지연을 워치독이 정체로 오판해
+   *  준비 중인 재생을 끊는다(교차검증 codex 2026-07-26 — Media3 는 prepare 후 BUFFERING 을
+   *  거치며 그동안 currentTime 은 0 에 머문다). */
+  busy(): boolean {
+    if (this.pendingSynth) return true;
+    const p = this.player;
+    if (!p) return false;
+    // ⚠️ "준비 중" 판정에는 반드시 시간 상한이 있어야 한다(교차검증 codex CRITICAL
+    // 2026-07-26): 재생이 시작조차 못 하고 죽으면(playing=false, currentTime=0) 이 함수가
+    // 영원히 true 를 돌려 워치독이 매 틱 시계를 되돌린다 — 복구가 영영 호출되지 않는다.
+    if (Date.now() - this.playStartedAt > START_GRACE_MS) return false;
+    try {
+      if (p.isBuffering) return true;
+      // 아직 재생에 들어가지 않았다 = 준비 중(일시정지는 워치독이 해제돼 있어 여기 안 온다).
+      if (!p.playing && (p.currentTime || 0) <= 0) return true;
+    } catch {
+      /* 네이티브 읽기 실패 — 정체 판정은 progressMs 쪽에 맡긴다 */
+    }
+    return false;
+  }
+
+  /** 끝까지 재생됐는데 완료 통지만 안 온 상태(TtsEngine.finishedButIdle 주석 참조). */
+  finishedButIdle(): boolean {
+    const p = this.player;
+    if (!p) return false;
+    try {
+      const dur = p.duration || 0;
+      const pos = p.currentTime || 0;
+      // duration 이 상수 여유(0.25s)보다 짧으면 "duration − 여유"가 음수가 되어 거의 모든
+      // 위치가 완료로 판정된다(교차검증 codex 2026-07-26) — 비율 기준을 함께 쓴다.
+      // 재생 중이면 완료가 아니다: 통지 유실은 재생이 멈춘 뒤에만 의미가 있다.
+      if (dur <= 0 || pos <= 0 || p.playing) return false;
+      return pos >= Math.max(dur * END_RATIO, dur - END_EPSILON_S);
+    } catch {
+      return false;
+    }
   }
 
   async getVoices(): Promise<EngineVoice[]> {
@@ -893,6 +953,7 @@ export class SherpaTtsEngine implements TtsEngine {
     preloaded?: AudioPlayer,
   ): void {
     try {
+      this.playStartedAt = Date.now();
       this.currentUri = synth.uri;
       this.currentSynth = synth;
       this.currentModelSpeed = sherpaModelSpeed(params.rate);

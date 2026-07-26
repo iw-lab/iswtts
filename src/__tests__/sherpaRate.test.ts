@@ -15,17 +15,21 @@ describe('sherpa 배속(상한 없음 — 스트레치 3× 우선, 초과분 모
     expect(sherpaPlaybackRate(10)).toBeCloseTo(10 / 3, 5);
   });
 
-  test('≤3×는 스트레치 전담(모델 개입 금지 — 음소 붕괴 CER 실측 2.0=72%)', () => {
-    for (const r of [1.5, 2, 2.5, 3]) {
+  // v1.28.0: 스트레치 단독 상한 3.0 → 2.5(rate.ts SONIC_FIRST_MAX 주석의 실측). 통상 감상
+  // 구간(≤2.5×)은 종전과 완전히 동일 — 저배속에서 모델 개입은 CER 을 8배 악화시킨다.
+  test('≤2.5×는 스트레치 전담(모델 개입 금지 — 2.0× 실측 CER 0.016 vs 모델혼합 0.136)', () => {
+    for (const r of [1.5, 2, 2.4, 2.5]) {
       expect(sherpaModelSpeed(r)).toBe(1);
       expect(sherpaPlaybackRate(r)).toBe(r);
     }
   });
 
-  test('3× 초과 — 스트레치 3.0 고정, 초과분만 모델(조합이 순수 스트레치보다 우수 실측)', () => {
-    expect(sherpaPlaybackRate(4)).toBeCloseTo(3, 5);
-    expect(sherpaModelSpeed(4)).toBeCloseTo(4 / 3, 5);
-    expect(sherpaModelSpeed(6)).toBeCloseTo(2, 5);
+  test('2.5× 초과 — 스트레치 2.5 고정, 초과분만 모델(3× 실측 CER 0.696 → 0.327)', () => {
+    expect(sherpaPlaybackRate(3)).toBeCloseTo(2.5, 5);
+    expect(sherpaModelSpeed(3)).toBeCloseTo(3 / 2.5, 5);
+    expect(sherpaPlaybackRate(4)).toBeCloseTo(2.5, 5);
+    expect(sherpaModelSpeed(4)).toBeCloseTo(4 / 2.5, 5);
+    expect(sherpaModelSpeed(6)).toBeCloseTo(2.4, 5);
   });
 
   test('저속(<1×)은 모델 전담', () => {
@@ -36,7 +40,9 @@ describe('sherpa 배속(상한 없음 — 스트레치 3× 우선, 초과분 모
 });
 
 describe('스마트 스피드(무음 압축) 연동', () => {
-  test('적용 정책 — 스트레치 온전 구간(≤3×)은 미적용, 초고배속(>3×)만', () => {
+  // ⚠️ 무음 압축 임계(3.0)는 스트레치 경계(2.5)와 **별개 상수**다(v1.28.0에서 분리). 예전엔
+  // 같은 상수를 공유해서, 스트레치 경계를 내리면 낭독 리듬(쉼 압축)까지 함께 바뀌었다.
+  test('적용 정책 — 낭독 리듬 보존 구간(≤3×)은 미적용, 초고배속(>3×)만', () => {
     for (const r of [0.5, 1, 2, 3]) expect(sherpaTrimEnabled(r)).toBe(false);
     for (const r of [3.01, 4, 5, 10]) expect(sherpaTrimEnabled(r)).toBe(true);
     expect(sherpaTrimEnabled(undefined)).toBe(false);
@@ -48,9 +54,9 @@ describe('스마트 스피드(무음 압축) 연동', () => {
         expect(sherpaModelSpeed(r) * f * sherpaPlaybackRate(r, f)).toBeCloseTo(r, 5);
       }
     }
-    // 3<r≤9 구간에서 실효 스트레치 = 3/f (압축이 스트레치를 직접 덜어낸다)
-    expect(sherpaPlaybackRate(5, 1.25)).toBeCloseTo(3 / 1.25, 5);
-    expect(sherpaPlaybackRate(4, 1.2)).toBeCloseTo(3 / 1.2, 5);
+    // 2.5<r 구간에서 실효 스트레치 = 2.5/f (압축이 스트레치를 직접 덜어낸다)
+    expect(sherpaPlaybackRate(5, 1.25)).toBeCloseTo(2.5 / 1.25, 5);
+    expect(sherpaPlaybackRate(4, 1.2)).toBeCloseTo(2.5 / 1.2, 5);
   });
 
   test('비정상 trimFactor(NaN·<1)는 1로 취급 — 기존 동작과 동일', () => {
