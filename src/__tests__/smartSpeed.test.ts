@@ -95,7 +95,38 @@ describe('짧은 문장 머리 여유(v1.27.0)', () => {
     expect(leadPadMsFor('예!', 0.5)).toBe(SHORT_LEAD_PAD_MS); // 저속은 하한 1× 취급
     expect(leadPadMsFor('예!', 5)).toBe(SHORT_LEAD_PAD_MS * 3); // 상한 3(>3×는 압축 경로라 무관)
     expect(leadPadMsFor('예!', 2.1)).toBe(Math.round(SHORT_LEAD_PAD_MS * 2.5)); // 0.5 단위 올림 양자화(캐시 키 파편화 방지)
-    expect(leadPadMsFor('그는 조용히 걸었다.', 2.5)).toBe(LEAD_PAD_MS); // 일반 문장은 배속 무관
+  });
+
+  // v1.30.0 — 사용자 보고 2026-07-29 "2.5배속에서 문장 맨 위가 가끔 잘린다".
+  // 종전엔 일반 문장만 40ms 고정이라 2.1× 스트레치 아래에서 실시간 여유가 19ms 뿐이었다.
+  describe('일반 문장도 배속 비례(v1.30.0)', () => {
+    const { longLeadPadMs } = require('../tts/sherpa/smartSpeed');
+    const LONG = '그는 조용히 걸었다.';
+    test('1× 는 종전과 완전히 동일 — 통상 감상 속도의 리듬을 건드리지 않는다', () => {
+      expect(leadPadMsFor(LONG, 1)).toBe(LEAD_PAD_MS);
+      expect(leadPadMsFor(LONG, undefined)).toBe(LEAD_PAD_MS);
+      expect(leadPadMsFor(LONG, 0.5)).toBe(LEAD_PAD_MS);
+    });
+    test('고배속에서는 배속만큼 키운다', () => {
+      expect(leadPadMsFor(LONG, 2.5)).toBe(LEAD_PAD_MS * 2.5);
+      expect(leadPadMsFor(LONG, 3)).toBe(LEAD_PAD_MS * 3);
+      expect(leadPadMsFor(LONG, 5)).toBe(LEAD_PAD_MS * 3); // 상한 3
+    });
+    test('지름길(longLeadPadMs)과 본 경로가 같은 값 — 캐시 키=오디오 정합의 전제', () => {
+      for (const r of [undefined, 0.5, 1, 1.4, 2.1, 2.5, 3, 5]) {
+        expect(longLeadPadMs(r)).toBe(leadPadMsFor(LONG, r));
+      }
+    });
+    // 실시간 흡수량 = 패드 ÷ 재생 스트레치. 스트레치는 SONIC_FIRST_MAX(2.1)에서 멈추므로
+    // 2.5× 에서 100/2.1 ≈ 48ms — 1× 의 40ms 와 같은 수준으로 되돌아온다.
+    test('2.5× 실시간 여유가 1× 수준으로 복원된다(잘림의 산수)', () => {
+      const { sherpaPlaybackRate } = require('../tts/sherpa/rate');
+      const realtime = (rate: number) => leadPadMsFor(LONG, rate) / sherpaPlaybackRate(rate);
+      expect(realtime(2.5)).toBeGreaterThanOrEqual(LEAD_PAD_MS);
+      expect(realtime(3)).toBeGreaterThanOrEqual(LEAD_PAD_MS);
+      // 종전(40ms 고정)이 얼마나 얇았는지 함께 잠가 둔다 — 회귀 시 이 줄이 먼저 깨진다.
+      expect(LEAD_PAD_MS / sherpaPlaybackRate(2.5)).toBeLessThan(20);
+    });
   });
   test('패드가 align 의 쉼 최소길이(120ms)보다 길다 = 하이라이트가 쉼으로 분류', () => {
     expect(SHORT_LEAD_PAD_MS).toBeGreaterThan(120);

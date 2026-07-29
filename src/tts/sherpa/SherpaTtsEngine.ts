@@ -21,6 +21,7 @@ import {
   quietRuns,
   LEAD_PAD_MS,
   leadPadMsFor,
+  longLeadPadMs,
   TRAIL_PAD_MS,
   EDGE_FADE_MS,
   KEEP_SIDE_MS,
@@ -112,8 +113,8 @@ const SHORT_CAP_MAX_SPEECH_MS = 320;
 // 캡 하한 = 설정 배속의 75%(v1.27.3: 60%→75%). 1×까지 뚝 떨어뜨리면 주변 문장(2.5×)과의
 // 대비가 램프로 들린다 — "예!"(발화 300ms)는 2.5×에서 1.9× 안팎 = 실 160ms(가청 충분).
 const SHORT_CAP_FLOOR_RATIO = 0.75;
-// 즉석 생성 플레이어의 재생 지연(ms) — 배속이 네이티브에 반영될 틈(playFile 주석).
-const PLAY_DEFER_MS = 24;
+// (구 PLAY_DEFER_MS — 즉석 생성 플레이어의 재생을 24ms 미루던 완충. v1.30.0 에서 폐지했다:
+//  백그라운드에서는 JS 타이머가 멈춰 그 play() 가 영영 오지 않았다. 근거는 playFile 주석.)
 // "끝까지 재생됐다"로 볼 잔여(초). 네이티브 위치 보고는 마지막 버퍼에서 duration 에 정확히
 // 닿지 않는 경우가 있어 여유를 둔다(finishedButIdle).
 const END_EPSILON_S = 0.25;
@@ -646,7 +647,7 @@ export class SherpaTtsEngine implements TtsEngine {
     if (langOf(params.language) !== 'ko') return leadPadMsFor(text, params.rate);
     // 지름길 문턱은 따옴표를 벗긴 길이 기준(정규화도 벗기므로) — 따옴표가 잔뜩 붙은 짧은
     // 대사가 원문 길이만으로 일반 문장 취급되는 것을 막는다(교차검증 codex 지적).
-    if (text.replace(SPOKEN_QUOTES, '').length > 24) return LEAD_PAD_MS;
+    if (text.replace(SPOKEN_QUOTES, '').length > 24) return longLeadPadMs(params.rate);
     return leadPadMsFor(normalizeForSpeech(text), params.rate);
   }
 
@@ -815,6 +816,9 @@ export class SherpaTtsEngine implements TtsEngine {
     // "좋게 들린다"가 아니었다(자기함정). 검증된 원본 유지.
     let rawSamples: ArrayLike<number>;
     let sampleRate: number;
+    // 이 발화의 머리 여유(ms). 조립 경로(첫 절)와 트림 경로가 같은 값을 써야 하고, keyOf 도
+    // 같은 leadPadOf 를 부르므로 캐시 키=오디오 정합이 유지된다.
+    const leadPad = this.leadPadOf(text, params);
     if (chunks.length === 1) {
       const audio = await gen(chunks[0]);
       rawSamples = audio.samples;
@@ -823,7 +827,10 @@ export class SherpaTtsEngine implements TtsEngine {
       // 절 단위 합성 + 조립: 각 절의 앞뒤 죽은 공기(~0.9s)를 짧은 패드로 다듬고, 이음새에
       // 쉼표 숨(INTER_CHUNK_PAUSE)을 넣는다. >3× 는 아래 compressSilence 가 이 쉼도 함께
       // 압축하므로 초고배속의 밀도는 유지된다.
-      const assembled = await this.synthesizeChunks(chunks, gen, breathOn);
+      // ⚠️ 첫 절의 머리 패드는 이 발화의 머리 패드다(v1.30.0). 절마다 40ms 로 다듬으면
+      // 조립된 파형의 머리가 40ms 로 굳고, 바깥 트림은 "머리 무음 ≥ 80+요구패드" 일 때만
+      // 자르므로 더는 손대지 못한다 — 배속 비례 패드가 장문(다절) 문장에만 통째로 안 먹혔다.
+      const assembled = await this.synthesizeChunks(chunks, gen, breathOn, leadPad);
       rawSamples = assembled.samples;
       sampleRate = assembled.sampleRate;
     }
@@ -852,16 +859,15 @@ export class SherpaTtsEngine implements TtsEngine {
       // 그대로 두면 v1.27.0 에서 고쳤던 "'예!' 같은 짧은 말이 통째로 안 들린다"가 되살아난다
       // (사용자 보고 2026-07-21·07-23). 압축을 3× 로 확대하면서 이 경로가 사용자의 상시
       // 배속에 들어오므로 반드시 함께 채운다. keyOf 도 같은 leadPadOf 를 쓰므로 캐시 정합 유지.
-      const padMs = Math.max(0, this.leadPadOf(text, params) - KEEP_SIDE_MS);
+      const padMs = Math.max(0, leadPad - KEEP_SIDE_MS);
       const padN = Math.round((sampleRate * padMs) / 1000);
       samples = padN > 0 ? new Array<number>(padN).fill(0).concat(compressed) : compressed;
       // 패드가 붙어 길이가 늘었으므로 압축 몫을 실제 길이로 다시 계산한다 — 안 하면 곱
       // 불변식(모델 × 압축 × 재생속도 = 설정 배속)이 패드만큼 어긋나 더 빨리 재생된다.
       trimFactor = Math.max(1, rawSamples.length / samples.length);
     } else {
-      // 짧은 문장은 머리 여유를 키운다(배속 비례 — "짧은 말 씹힘" 대책, smartSpeed.ts).
+      // 머리 여유는 배속 비례(LEAD_PAD_RATE_MAX 주석) — 짧은 문장은 더 넉넉히.
       // ⚠️ 패드는 반드시 leadPadOf(키 계산과 동일 함수) — 갈리면 캐시 키=오디오 정합이 깨진다.
-      const leadPad = this.leadPadOf(text, params);
       samples = trimEdgeSilence(rawSamples, sampleRate, leadPad, undefined, EDGE_FADE_MS);
       // 말이 끝난 뒤 남는 화자 고유의 저레벨 날숨을 눕힌다(smartSpeed.gateTailMurmur 근거).
       // 트림 "뒤"에 도는 이유: 꼬리 무음이 정리된 상태여야 마지막 강프레임 판정이 정확하다.
@@ -930,6 +936,7 @@ export class SherpaTtsEngine implements TtsEngine {
     chunks: string[],
     gen: (input: string) => Promise<{ samples: ArrayLike<number>; sampleRate: number }>,
     breathOn = false,
+    leadPadMs: number = LEAD_PAD_MS,
   ): Promise<{ samples: number[]; sampleRate: number }> {
     const pieces: number[][] = [];
     let sampleRate = 44100;
@@ -937,7 +944,10 @@ export class SherpaTtsEngine implements TtsEngine {
       const audio = await gen(chunks[i]);
       sampleRate = audio.sampleRate;
       const trail = i === chunks.length - 1 ? TRAIL_PAD_MS : CHUNK_TRAIL_PAD_MS;
-      pieces.push(trimEdgeSilence(audio.samples, sampleRate, LEAD_PAD_MS, trail, EDGE_FADE_MS));
+      // 첫 절만 발화 머리 패드(배속 비례) — 나머지 절 머리는 이음새 쉼의 구성요소라
+      // 40ms 고정이다(이 파일 상단 "절 이음새 쉼 ≈ 360ms" 주석의 그 40).
+      const lead = i === 0 ? leadPadMs : LEAD_PAD_MS;
+      pieces.push(trimEdgeSilence(audio.samples, sampleRate, lead, trail, EDGE_FADE_MS));
     }
     // 이음새 쉼: 기본 INTER_CHUNK_PAUSE_MS − 결정론 지터(195~240ms — chunkPauseJitterMs
     // 주석, v1.25.0). 숨 모드면 이음새마다 "앞 무음 + 합성 들숨 + 뒤 무음"(BREATH_PRE/POST
@@ -1101,25 +1111,30 @@ export class SherpaTtsEngine implements TtsEngine {
 
       if (subtitlesVisible()) startPoll();
 
-      if (preloaded) {
-        player.play();
-      } else {
-        // 즉석 생성 경로(캐시 미스)에서는 재생을 한 틱 미룬다. expo-audio 의 createAudioPlayer
-        // 는 생성 즉시 prepare() 를 시작하고 setPlaybackRate 는 네이티브 메인 큐에 올라가므로
-        // (AudioModule.kt Function("setPlaybackRate") → mainQueue.launch), 준비가 빠른 짧은
-        // 파일에서는 배속이 반영되기 전에 첫 PCM 이 흘러 문장 앞부분만 1×로 들릴 수 있다
-        // (교차검증 codex: Media3 DefaultAudioSink 는 이미 drain 된 버퍼 뒤에 새 파라미터를
-        // 적용한다). 프리로드 경로는 수 초 전에 배속이 적용돼 있어 해당 없음.
-        // 24ms 지연은 이미 합성을 기다린 이 경로에서 체감 0 — 확증이 아니라 완충이다.
-        const g = myGen;
-        setTimeout(() => {
-          if (g !== this.playGen || this.player !== player) return;
-          try {
-            player.setPlaybackRate(this.effectivePlaybackRate(synth, params));
-            player.play();
-          } catch { /* teardown 과 경합하면 조용히 포기 */ }
-        }, PLAY_DEFER_MS);
-      }
+      // 🔴 재생 시작은 **절대 JS 타이머 뒤에 두지 않는다**(v1.30.0 — 실기기 실측으로 확정).
+      //
+      // RN 은 액티비티가 pause 되면 JS 타이머를 통째로 멈춘다(JavaTimerManager 가 타이머를
+      // 모는 choreographer 프레임 콜백을 떼어낸다). 화면 끄기·홈·다른 앱 전환이 전부 pause 다.
+      // v1.29.0 까지 이 자리에 setTimeout(…, 24ms) 이 있었고, 그래서 백그라운드로 나간 순간
+      // 캐시 미스 문장의 play() 가 영영 오지 않았다 = 사용자 보고 "화면 끄면 바로 낭독 중지",
+      // "화면 내리기만 해도, 다른 앱 들어가도 멈춤"(2026-07-29).
+      //
+      // 실측 귀속(Galaxy S25 Ultra / Android 16, adb):
+      //   · logcat: 홈 누르는 순간 `ReactHost{0}.onHostPause()`
+      //   · dumpsys audio: 문장 플레이어가 만들어진 채 `state:idle` 로 남음
+      //     (앵커·배경음은 `state:started` 유지 → 432Hz 만 계속 들리던 이유)
+      //   · 웨이크락 유지·FGS 유지·CPU 소비 증가(합성은 계속 돎) → 절전·동결이 아니다
+      //   · 프리로드된 문장은 여기서 바로 play() 하므로 잘 넘어갔다 → "어떨 땐 좀 진행되다 멈춤"
+      // gapPlayer.ts 가 v1.23.0 에 이미 같은 함정을 기록해 뒀는데(쉼을 setTimeout 으로 걸었다가
+      // 회귀), 재생 시작 경로만 남아 있었다.
+      //
+      // 미루지 않아도 배속 반영 순서는 지켜진다: setPlaybackRate 와 play 는 둘 다 호출 순서대로
+      // 네이티브 메인 루퍼에 올라가고(AudioModule.kt), 재생은 play() 가 실행돼야 시작되므로
+      // 그 전에 배속이 적용된다. 배속은 플레이어 생성 직후에도 한 번 걸어 뒀다(위).
+      try {
+        player.setPlaybackRate(this.effectivePlaybackRate(synth, params));
+      } catch { /* teardown 과 경합하면 조용히 포기 */ }
+      player.play();
     } catch (e) {
       this.teardownPlayback();
       handlers.onError?.(e instanceof Error ? e : new Error(String(e)));
