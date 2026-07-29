@@ -23,6 +23,7 @@ import {
   leadPadMsFor,
   TRAIL_PAD_MS,
   EDGE_FADE_MS,
+  KEEP_SIDE_MS,
 } from './smartSpeed';
 import { normalizeForSpeech, SPOKEN_QUOTES } from './normalizeKo';
 import { chunkForSynthesis, hasClauseComma, chunkPauseJitterMs } from './chunkKo';
@@ -844,13 +845,19 @@ export class SherpaTtsEngine implements TtsEngine {
       // f≈1.1~1.3 이라 이 분기는 거의 도달하지 않는다 — 계약 파손 방지용 안전판이다.
       // 압축 몫을 줄여서 보고하면 안 된다 — 파일은 이미 그만큼 짧아져 있어서 그러면 오히려
       // 더 빨라진다. 예산을 넘으면 압축분을 통째로 버리고 원본을 쓴다(안전한 방향).
-      if (c.factor <= trimFactorBudget(params.rate)) {
-        samples = c.samples;
-        trimFactor = c.factor;
-      } else {
-        samples = Array.from(rawSamples);
-        trimFactor = 1;
-      }
+      const compressed =
+        c.factor <= trimFactorBudget(params.rate) ? c.samples : Array.from(rawSamples);
+      // ⚠️ 짧은 문장 머리 여유는 이 경로에서도 지켜야 한다(v1.29.0). compressSilence 는 앞
+      // 무음을 KEEP_SIDE_MS(40ms)만 남기는데, 그건 재생 시작 손실을 흡수하기엔 턱없이 짧다 —
+      // 그대로 두면 v1.27.0 에서 고쳤던 "'예!' 같은 짧은 말이 통째로 안 들린다"가 되살아난다
+      // (사용자 보고 2026-07-21·07-23). 압축을 3× 로 확대하면서 이 경로가 사용자의 상시
+      // 배속에 들어오므로 반드시 함께 채운다. keyOf 도 같은 leadPadOf 를 쓰므로 캐시 정합 유지.
+      const padMs = Math.max(0, this.leadPadOf(text, params) - KEEP_SIDE_MS);
+      const padN = Math.round((sampleRate * padMs) / 1000);
+      samples = padN > 0 ? new Array<number>(padN).fill(0).concat(compressed) : compressed;
+      // 패드가 붙어 길이가 늘었으므로 압축 몫을 실제 길이로 다시 계산한다 — 안 하면 곱
+      // 불변식(모델 × 압축 × 재생속도 = 설정 배속)이 패드만큼 어긋나 더 빨리 재생된다.
+      trimFactor = Math.max(1, rawSamples.length / samples.length);
     } else {
       // 짧은 문장은 머리 여유를 키운다(배속 비례 — "짧은 말 씹힘" 대책, smartSpeed.ts).
       // ⚠️ 패드는 반드시 leadPadOf(키 계산과 동일 함수) — 갈리면 캐시 키=오디오 정합이 깨진다.

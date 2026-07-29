@@ -38,7 +38,16 @@ export const SHERPA_QUALITY_MAX = 3.2; // 품질 무손상 임계(시스템 음�
 const SONIC_FIRST_MAX = 2.1;
 // 스마트 스피드(무음 압축) 시작 배속. ⚠️ SONIC_FIRST_MAX 와 분리해 둔다(v1.28.0) — 예전엔
 // 같은 상수를 공유해서, 스트레치 경계를 내리면 무음 압축까지 함께 켜져 낭독 리듬이 통째로
-// 바뀔 뻔했다. 이쪽은 "훑어 듣기" 기능이라 종전 3.0 을 유지한다.
+// 바뀌었다. 두 경계는 서로 다른 근거로 움직인다.
+//
+// v1.29.0: 판정을 "초과(>)"에서 "이상(≥)"으로 바꿔 **3.0× 자신을 포함**한다(사용자 보고
+// 2026-07-29 "3배속은 씹히기도 한다"). 짝비교 실측(n=24, chop3x.py):
+//   3.0×  압축 없음 CER 0.361 → 압축 0.254   (문장별 개선 14 / 악화 8, 평균차 −0.107)
+//   2.5×  압축 없음 0.091 → 압축 0.098        (개선 4 / 악화 6 — 이득 없음)
+//   2.2×  압축 없음 0.074 → 압축 0.076        (개선 7 / 악화 8 — 이득 없음)
+// 즉 압축은 "이미 무너지는 구간"에서만 도움이 된다 — 그래서 경계를 내리지 않고 3.0 만
+// 포함시킨다(눈금상 2.5 다음이 3.0 이라 실질은 "3× 이상"). 같은 실측에서 모델 분담을 더
+// 늘리는 안(1.60·1.75)은 확실히 나빠 기각했다(개선 5/악화 18, 개선 1/악화 22).
 const SMART_SPEED_MIN = 3.0;
 const MODEL_MAX = 3.0; // 모델 speed ≥4.0 = 전 구간 무음(실측) — 하드 경계
 const PLAYBACK_HARD_MAX = 10.0; // expo-audio 패치(coerceIn 상한)와 일치
@@ -116,17 +125,22 @@ export function sherpaRubato(text: string): number {
   return RUBATO_MIN + ((RUBATO_MAX - RUBATO_MIN) * v) / 1000;
 }
 
-// 스마트 스피드(무음 압축) 적용 여부 — 스트레치 온전 구간(≤3×)의 확정된 소리는 건드리지
-// 않고, 스트레치가 한계(3.0)에 붙는 초고배속에서만 쉼을 압축해 부담을 덜어낸다.
+// 스마트 스피드(무음 압축) 적용 여부 — 명료도가 실제로 무너지는 3× 이상에서만 쉼을 압축해
+// 스트레치 부담을 덜어낸다(근거·실측은 SMART_SPEED_MIN 주석). 그 아래는 이득이 없어 확정된
+// 소리를 건드리지 않는다.
 export function sherpaTrimEnabled(rate?: number): boolean {
-  return Number.isFinite(rate as number) && (rate as number) > SMART_SPEED_MIN;
+  return Number.isFinite(rate as number) && (rate as number) >= SMART_SPEED_MIN;
 }
 
 // 재생 완급 인자(v1.26.1) — 템포 평준화 × 루바토를 "피치 보존 재생 스트레치"에 곱한다.
 // 최종 재생속도 = sherpaPlaybackRate(rate, trim) × sherpaPaceComp(...). 합성 speed 는 이제
 // 순수 sherpaModelSpeed 만(F0 부작용 근거는 sherpaTempoComp 주석) — 완급이 파일에 안
 // 구워지므로 캐시 키에서 루바토 플래그도 사라진다.
-// >3×(스마트 스피드)는 훑어 듣는 속도라 완급 무의미 + 압축 몫 계산과 얽히지 않게 1 고정.
+// >3×(훑어 듣는 속도)는 완급이 무의미해 1 고정.
+// ⚠️ 게이트가 sherpaTrimEnabled 가 아니라 **SMART_SPEED_MIN 초과**인 이유(v1.29.0): 압축을
+// 3.0× 에 켜면서 게이트를 공유했다면 3.0× 에서 짧은 문장 템포 보정(tempoComp)까지 함께
+// 꺼져, 측정하지 않은 변화(짧은 문장 12% 빨라짐)가 딸려 들어왔다. 이번에 바꾼 것은 압축
+// 하나뿐이어야 한다 — 3.0× 의 완급은 2.5× 와 동일하게 유지한다.
 // 하한: comp ≤ 1 이고 rate ≤ 1 에서도 최종 재생속도 = 1 × comp ≥ SPEED_COMP_FLOOR(0.85)
 // ≥ expo-audio 하한(0.5) — 클램프 충돌 없음.
 export function sherpaPaceComp(
@@ -134,7 +148,8 @@ export function sherpaPaceComp(
   rubatoRaw: number,
   opts: { rate?: number; rubatoOn?: boolean },
 ): number {
-  if (sherpaTrimEnabled(opts.rate)) return 1;
+  const r0 = opts.rate;
+  if (Number.isFinite(r0 as number) && (r0 as number) > SMART_SPEED_MIN) return 1;
   const t = Number.isFinite(tempoComp) && tempoComp > 0 ? tempoComp : 1;
   const r =
     opts.rubatoOn && rubatoActive(opts.rate) && Number.isFinite(rubatoRaw) && rubatoRaw > 0
