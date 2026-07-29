@@ -24,6 +24,7 @@ import { EDGE_VOICES, defaultEdgeVoice, resolveEdgeVoice } from './voices';
 import { edgeSsmlRatePct, edgePlaybackRate } from './rate';
 import { disposePlayer } from '../disposePlayer';
 import { subtitlesVisible, onVisibilityChange } from '../../lib/visibility';
+import { synthWaitIsNormal, SYNTH_GRACE_MS } from '../../lib/playbackWatchdog';
 
 type Word = { text: string; offsetMs: number };
 type Boundary = { ms: number; charIndex: number; charLen: number };
@@ -62,6 +63,10 @@ const STATUS_UPDATE_MS = 80;
 const END_EPSILON_S = 0.25;
 const END_RATIO = 0.9;
 const START_GRACE_MS = 8_000;
+// 실제 디코더 버퍼링을 "정상 준비 중"으로 봐 주는 상한(ms). 시작 유예(START_GRACE_MS)와
+// 분리한다 — 저사양 기기의 버퍼링이 8초를 넘길 수 있는데, 그걸 시작 실패로 묶으면 정상
+// 재생을 끊는다(교차검증 codex CRITICAL 2026-07-29).
+const BUFFER_GRACE_MS = 30_000;
 
 // Edge(Read Aloud) 온라인 신경망 엔진. 문장 하나 = WebSocket 요청 하나(오디오+단어타이밍) →
 // 파일로 받아 expo-audio 로 재생, 재생위치를 폴링해 기존 onBoundary 콜백으로 단어 하이라이트.
@@ -91,6 +96,8 @@ export class EdgeTtsEngine implements TtsEngine {
   private cache = new Map<string, CacheEntry>();
   // 이번 발화의 재생 시작 시도 시각 — busy() 의 "준비 중" 판정 상한 기준점.
   private playStartedAt = 0;
+  // 지금 기다리는 합성을 요청한 시각 — 합성 대기 상한(SYNTH_GRACE_MS) 기준점.
+  private pendingSynthAt = 0;
 
   // ── 워치독 프로브(playbackWatchdog.ts) — sherpa 와 동일 계약 ────────
   /** 현재 재생 위치(ms). 상태 이벤트가 끊겨도 네이티브에서 직접 읽는다. */
@@ -106,13 +113,18 @@ export class EdgeTtsEngine implements TtsEngine {
   /** 정상적인 준비 상태: 합성(WebSocket 왕복) 대기 · 버퍼링 · 재생 시작 직전.
    *  근거는 SherpaTtsEngine.busy 주석과 동일(교차검증 codex 2026-07-26). */
   busy(): boolean {
-    if (this.pendingSynth) return true;
+    // 합성 대기에도 상한 필수 — 상한이 없으면 체인이 막힌 순간 워치독이 통째로 죽는다
+    // (SherpaTtsEngine.busy 주석의 같은 결함).
+    if (this.pendingSynth) return synthWaitIsNormal(this.pendingSynthAt, SYNTH_GRACE_MS);
     const p = this.player;
     if (!p) return false;
     // 시작 대기에는 상한을 둔다 — 근거는 SherpaTtsEngine.busy 주석(무한 대기 시 워치독 무력화).
-    if (Date.now() - this.playStartedAt > START_GRACE_MS) return false;
+    const waited = Date.now() - this.playStartedAt;
     try {
-      if (p.isBuffering) return true;
+      // 버퍼링 상한은 시작 유예와 별도(근거는 SherpaTtsEngine.busy 주석 — 실제 버퍼링을
+      // 정체로 오판하지 않게).
+      if (p.isBuffering && waited <= BUFFER_GRACE_MS) return true;
+      if (waited > START_GRACE_MS) return false;
       if (!p.playing && (p.currentTime || 0) <= 0) return true;
     } catch {
       /* 네이티브 읽기 실패 — progressMs 쪽 판정에 맡긴다 */
@@ -142,6 +154,7 @@ export class EdgeTtsEngine implements TtsEngine {
     if (entry) this.cache.delete(key); // 소비: 이 파일의 소유권을 재생 쪽으로 이전
     else entry = this.makeSynth(text, params);
     this.pendingSynth = entry;
+    this.pendingSynthAt = Date.now();
 
     entry.promise.then(
       (synth) => {

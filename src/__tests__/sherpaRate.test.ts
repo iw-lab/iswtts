@@ -15,21 +15,25 @@ describe('sherpa 배속(상한 없음 — 스트레치 3× 우선, 초과분 모
     expect(sherpaPlaybackRate(10)).toBeCloseTo(10 / 3, 5);
   });
 
-  // v1.28.0: 스트레치 단독 상한 3.0 → 2.5(rate.ts SONIC_FIRST_MAX 주석의 실측). 통상 감상
-  // 구간(≤2.5×)은 종전과 완전히 동일 — 저배속에서 모델 개입은 CER 을 8배 악화시킨다.
-  test('≤2.5×는 스트레치 전담(모델 개입 금지 — 2.0× 실측 CER 0.016 vs 모델혼합 0.136)', () => {
-    for (const r of [1.5, 2, 2.4, 2.5]) {
+  // v1.29.0: 스트레치 단독 상한 2.5 → 2.1(rate.ts SONIC_FIRST_MAX 주석의 짝비교 실측 n=24).
+  // 저배속 구간은 여전히 스트레치 전담 — 2.0×에서 모델 개입은 CER 을 8배 악화시킨다.
+  test('≤2.1×는 스트레치 전담(모델 개입 금지 — 2.0× 실측 CER 0.016 vs 모델혼합 0.136)', () => {
+    for (const r of [1.5, 2, 2.05, 2.1]) {
       expect(sherpaModelSpeed(r)).toBe(1);
       expect(sherpaPlaybackRate(r)).toBe(r);
     }
   });
 
-  test('2.5× 초과 — 스트레치 2.5 고정, 초과분만 모델(3× 실측 CER 0.696 → 0.327)', () => {
-    expect(sherpaPlaybackRate(3)).toBeCloseTo(2.5, 5);
-    expect(sherpaModelSpeed(3)).toBeCloseTo(3 / 2.5, 5);
-    expect(sherpaPlaybackRate(4)).toBeCloseTo(2.5, 5);
-    expect(sherpaModelSpeed(4)).toBeCloseTo(4 / 2.5, 5);
-    expect(sherpaModelSpeed(6)).toBeCloseTo(2.4, 5);
+  test('2.1× 초과 — 스트레치 2.1 고정, 초과분만 모델(2.5× CER 0.216→0.123, 3× 0.399→0.309)', () => {
+    expect(sherpaPlaybackRate(2.5)).toBeCloseTo(2.1, 5);
+    expect(sherpaModelSpeed(2.5)).toBeCloseTo(2.5 / 2.1, 5);
+    expect(sherpaPlaybackRate(3)).toBeCloseTo(2.1, 5);
+    expect(sherpaModelSpeed(3)).toBeCloseTo(3 / 2.1, 5);
+    expect(sherpaPlaybackRate(4)).toBeCloseTo(2.1, 5);
+    // 실측 최적점을 실제로 맞히는지 — 이 상수의 존재 이유다.
+    expect(sherpaModelSpeed(2.5)).toBeCloseTo(1.19, 2);
+    expect(sherpaModelSpeed(3)).toBeCloseTo(1.43, 2);
+    expect(sherpaModelSpeed(9)).toBeCloseTo(3, 5); // MODEL_MAX 클램프
   });
 
   test('저속(<1×)은 모델 전담', () => {
@@ -40,7 +44,7 @@ describe('sherpa 배속(상한 없음 — 스트레치 3× 우선, 초과분 모
 });
 
 describe('스마트 스피드(무음 압축) 연동', () => {
-  // ⚠️ 무음 압축 임계(3.0)는 스트레치 경계(2.5)와 **별개 상수**다(v1.28.0에서 분리). 예전엔
+  // ⚠️ 무음 압축 임계(3.0)는 스트레치 경계(2.1)와 **별개 상수**다(v1.28.0에서 분리). 예전엔
   // 같은 상수를 공유해서, 스트레치 경계를 내리면 낭독 리듬(쉼 압축)까지 함께 바뀌었다.
   test('적용 정책 — 낭독 리듬 보존 구간(≤3×)은 미적용, 초고배속(>3×)만', () => {
     for (const r of [0.5, 1, 2, 3]) expect(sherpaTrimEnabled(r)).toBe(false);
@@ -54,9 +58,9 @@ describe('스마트 스피드(무음 압축) 연동', () => {
         expect(sherpaModelSpeed(r) * f * sherpaPlaybackRate(r, f)).toBeCloseTo(r, 5);
       }
     }
-    // 2.5<r 구간에서 실효 스트레치 = 2.5/f (압축이 스트레치를 직접 덜어낸다)
-    expect(sherpaPlaybackRate(5, 1.25)).toBeCloseTo(2.5 / 1.25, 5);
-    expect(sherpaPlaybackRate(4, 1.2)).toBeCloseTo(2.5 / 1.2, 5);
+    // SONIC_FIRST_MAX<r 구간에서 실효 스트레치 = 2.1/f (압축이 스트레치를 직접 덜어낸다)
+    expect(sherpaPlaybackRate(5, 1.25)).toBeCloseTo(2.1 / 1.25, 5);
+    expect(sherpaPlaybackRate(4, 1.2)).toBeCloseTo(2.1 / 1.2, 5);
   });
 
   test('비정상 trimFactor(NaN·<1)는 1로 취급 — 기존 동작과 동일', () => {
@@ -179,5 +183,31 @@ describe('루바토 배속 게이트(v1.27.1) — >2×에선 완급 변주가 "�
   });
   test('2×까지는 종전대로 루바토 적용', () => {
     expect(sherpaPaceComp(1, 0.9, { rate: 2, rubatoOn: true })).toBeCloseTo(0.9, 6);
+  });
+});
+
+// 교차검증 codex 2026-07-29: 압축 몫이 크면 필요한 재생속도가 expo-audio 하한(0.5) 아래로
+// 내려가 클램프에 걸리고, 그 순간 "모델 × 압축 × 재생속도 = 설정 배속" 계약이 조용히 깨져
+// **설정보다 빠르게** 재생된다. 압축 단계에서 넘지 말아야 할 예산을 못 박는다.
+describe('무음 압축 예산(곱 불변식 보호)', () => {
+  const { sherpaModelSpeed, sherpaPlaybackRate, trimFactorBudget } = require('../tts/sherpa/rate');
+
+  test('예산 안에서는 곱 불변식이 정확히 성립한다', () => {
+    for (const r of [3.01, 3.5, 4, 5, 6, 9, 10]) {
+      const f = trimFactorBudget(r);
+      expect(sherpaModelSpeed(r) * f * sherpaPlaybackRate(r, f)).toBeCloseTo(r, 5);
+      expect(sherpaPlaybackRate(r, f)).toBeGreaterThanOrEqual(0.5);
+    }
+  });
+
+  test('예산을 넘는 압축은 계약을 깬다 — 그래서 엔진이 그 압축을 버린다', () => {
+    const r = 3.01;
+    const over = trimFactorBudget(r) * 1.5;
+    // 넘겨서 계산하면 설정 배속보다 빨라진다(= 이 예산이 존재하는 이유).
+    expect(sherpaModelSpeed(r) * over * sherpaPlaybackRate(r, over)).toBeGreaterThan(r);
+  });
+
+  test('실측 압축비(1.1~1.3)는 항상 예산 안이다 — 정상 경로는 이 분기에 닿지 않는다', () => {
+    for (const r of [3.01, 4, 5, 10]) expect(trimFactorBudget(r)).toBeGreaterThan(1.3);
   });
 });

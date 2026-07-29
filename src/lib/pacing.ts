@@ -55,9 +55,26 @@ function hash(s: string): number {
   return h;
 }
 
+/** 쉼을 배속으로 나눌 때 쓰는 제수. 배속에 **선형으로** 나누지 않는다(v1.29.0).
+ *
+ *  사람은 빨리 말할 때 조음(말소리 자체)을 크게 줄이고 쉼은 그만큼 줄이지 않는다 —
+ *  빠른 낭독일수록 문장 경계의 쉼이 상대적으로 길게 남아, 그게 "빨라도 문장이 끊겨 들리는"
+ *  느낌을 만든다. v1.28.0 까지는 쉼을 배속으로 그대로 나눠(350ms → 3×에서 117ms) 문장
+ *  경계가 사실상 사라졌고, 고배속 낭독이 한 덩어리로 밀려나오는 벽처럼 들렸다
+ *  (사용자 보고 2026-07-29 "더 사람처럼", 상시 사용 배속 2.5~3.0×).
+ *
+ *  지수 0.65 = 조음과 쉼의 압축률을 다르게 두는 절충. 2.5× 에서 140ms → 196ms,
+ *  3.0× 에서 117ms → 173ms. 1× 는 완전히 종전과 같다(지수 무관).
+ *  ⚠️ 이건 실측이 아니라 설계 판단이다 — 사람 낭독의 쉼 스케일링을 이 기기에서 잴 방법이
+ *  없다. 대신 폭을 보수적으로 잡고 A/B 샘플로 청감 확인을 받는다. */
+const GAP_RATE_EXP = 0.65;
+function gapDivisor(rate: number): number {
+  return rate <= 1 ? 1 : Math.pow(rate, GAP_RATE_EXP);
+}
+
 /**
  * 문장 자동진행 시 다음 문장 발화 전에 둘 "추가" 쉼(ms).
- * - 배속 비례 축소(빠르게 들을수록 쉼도 짧게), >3×(스마트 스피드)는 0(훑는 속도의 밀도 유지).
+ * - 배속에 따라 축소하되 **선형이 아니다**(gapDivisor 주석), >3×(스마트 스피드)는 0.
  * - 결정적: 같은 (prev, next, 문단 여부, 배속)이면 항상 같은 값.
  */
 export function sentenceGapMs(
@@ -88,5 +105,5 @@ export function sentenceGapMs(
   // 최종 최대 700+50.
   const jitter = (hash(prev + '\u0000' + next) % (JITTER_MS * 2 + 1)) - JITTER_MS;
 
-  return Math.round(Math.max(0, Math.min(MAX_EXTRA_MS, ms) + jitter) / rate);
+  return Math.round(Math.max(0, Math.min(MAX_EXTRA_MS, ms) + jitter) / gapDivisor(rate));
 }

@@ -160,3 +160,63 @@ test('이름 화자 — 방향은 미상이나 교대는 지킨다', () => {
   expect(n.unknown).toBe(0);
   expect(n.ok + n.wrong).toBe(n.total); // 전부 배정됨(미상 폴백 아님)
 });
+
+
+// ── v1.29.0 추가 코퍼스: 지문 앵커가 없는 대화 ────────────────────
+// 실측 2026-07-29 로 드러난 진짜 실패 모드 — v1.28.0 은 이 조판에서 **시드에 따라
+// 100% ↔ 0% 로 통째로 뒤집혔다**(교대는 맞고 위상만 반대). 아래 두 테스트는 적중률과
+// 함께 "시드를 바꿔도 결과가 같은가"(위상이 텍스트로 고정됐는가)를 못 박는다.
+
+const DOC_ADDRESS = `두 사람은 나란히 걸었다.
+
+"오빠, 저기 좀 봐."
+
+"뭔데."
+
+"저 가게 새로 생겼나 봐."
+
+"어제도 있었어."
+
+"거짓말. 나 어제 여기 왔었거든."
+
+"그럼 못 본 거겠지."
+`;
+const EXPECT_ADDRESS: Array<'male' | 'female'> = ['female', 'male', 'female', 'male', 'female', 'male'];
+
+const DOC_NAMED_TURNS = `민준이 커피잔을 내려놓았다.
+
+"오래 기다렸어?"
+
+"방금 왔어." 지영이 웃으며 대답했다.
+
+"주말에 시간 있어?"
+
+"글쎄, 왜?"
+
+"같이 갈 데가 있어서."
+
+"어딘데?"
+`;
+const EXPECT_NAMED_TURNS: Array<'male' | 'female'> = ['male', 'female', 'male', 'female', 'male', 'female'];
+
+test('대사 안 호칭이 위상을 고정한다(지문 앵커 0개)', () => {
+  const r = audit(DOC_ADDRESS, EXPECT_ADDRESS, '호칭 단서 대화');
+  expect(r.ok / r.total).toBe(1);
+});
+
+test('이름 화자가 위상을 고정한다', () => {
+  const r = audit(DOC_NAMED_TURNS, EXPECT_NAMED_TURNS, '이름 화자 대화');
+  expect(r.ok / r.total).toBe(1);
+});
+
+// 이 파일의 핵심 불변식: **배정이 기본 화자(시드)에 좌우되면 안 된다**. 좌우된다면 그
+// 대화의 성별은 텍스트가 아니라 설정에서 온 것이고, 설정이 반대면 전부 반대로 들린다.
+test('시드 독립성 — 기본 화자를 남/여 어느 쪽으로 두어도 배정이 같다', () => {
+  for (const doc of [DOC, DOC_SINGLE, DOC_TRAILING, DOC_NAMES, DOC_ADDRESS, DOC_NAMED_TURNS]) {
+    const seg = segmentDocument(doc);
+    const paraStarts = new Set(seg.paraStarts ?? []);
+    const m = guessDialogueGenders(seg.sentences, paraStarts, { fallbackFirst: 'male' });
+    const f = guessDialogueGenders(seg.sentences, paraStarts, { fallbackFirst: 'female' });
+    expect(f).toEqual(m);
+  }
+});

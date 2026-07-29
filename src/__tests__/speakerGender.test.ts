@@ -46,7 +46,12 @@ describe('따옴표 누출 방지(교차검증 Gemini CONFIRMED)', () => {
 describe('주격 조사 제약(교차검증 codex CONFIRMED)', () => {
   const { guessDialogueGender } = require('../lib/speakerGender');
   test('여격(청자)·서술어 꼴은 화자 단서 아님', () => {
-    expect(guessDialogueGender('"안녕." 철수가 그녀에게 말했다.')).toBeNull();
+    // 이 테스트의 요지는 "그녀에게"(여격=듣는 쪽)를 화자로 오인하지 않는 것.
+    // v1.29.0 에서 이름(철수=남)을 알게 되면서 결과가 null → 'male' 로 바뀌었는데,
+    // 그게 정답이다(철수가 말했다). 여격 청자로 오인했다면 'female' 이 나왔을 것이다.
+    expect(guessDialogueGender('"안녕." 철수가 그녀에게 말했다.')).toBe('male');
+    // 이름을 모르는 화자로 같은 구조를 한 번 더 — 여격 단서만으로는 화자를 못 정한다.
+    expect(guessDialogueGender('"안녕." 종배가 그녀에게 말했다.')).toBeNull();
     expect(guessDialogueGender('"좋아." 그날따라 여자였다.')).toBeNull();
   });
   // v1.27.0 스펙 변경: 관형(소유격)이라도 "뒤에 발화 명사가 오면" 화자 표지로 인정한다 —
@@ -248,5 +253,124 @@ describe('발화 동사 다중/동음이의 방어(교차검증 Gemini 재현 20
     const s = ['사내가 문을 열었다.', '"누구요?"'];
     expect(guessDialogueGenders(s)[1]).toBe('male');
     expect(guessDialogueGenders(s, new Set([1]))[1]).toBe('male');
+  });
+});
+
+// ── v1.29.0: 대사 안 호칭 · 이름 화자 ───────────────────────────
+// 배경(실측 2026-07-29): 지문 앵커가 없는 대화 런은 위상(누가 먼저 말하는가)이 동전
+// 던지기였다 — 같은 코퍼스가 시드에 따라 100% ↔ 0% 로 통째로 뒤집혔다. 아래 두 단서가
+// 그 위상을 텍스트에서 고정한다. **오탐 하나가 대화 전체를 뒤집으므로** 정밀도 고정이 핵심.
+describe('대사 안 호칭 → 말하는 사람의 성별', () => {
+  const { addressCueGender } = require('../lib/speakerGender');
+
+  test('호격 호칭이 화자 성별을 드러낸다', () => {
+    expect(addressCueGender('"오빠, 저기 좀 봐."')).toBe('female');
+    expect(addressCueGender('"언니 먼저 가."')).toBe('female');
+    expect(addressCueGender('"누나, 나 왔어."')).toBe('male');
+    expect(addressCueGender('"형, 이것 좀."')).toBe('male');
+    expect(addressCueGender('"형님께 여쭤봐."')).toBe('male');
+  });
+
+  test('조사가 붙은 지칭도 인정한다(자기 오빠/형 이야기)', () => {
+    expect(addressCueGender('"우리 오빠는 안 왔어."')).toBe('female');
+    expect(addressCueGender('"형이 그러던데."')).toBe('male');
+  });
+
+  test('3인칭 관형어가 앞에 오면 남의 오빠/형 — 화자 성별을 말해 주지 않는다', () => {
+    expect(addressCueGender('"네 오빠는 뭐 해?"')).toBeNull();
+    expect(addressCueGender('"그녀 언니가 왔대."')).toBeNull();
+  });
+
+  test("'형'이 든 일반 낱말에 걸리지 않는다(형태·형사·형편·형제·인형·모형)", () => {
+    for (const s of [
+      '"형태가 이상해."',
+      '"형사가 다녀갔어."',
+      '"형편이 어렵다."',
+      '"형제가 몇이야?"',
+      '"인형이 예쁘네."',
+      '"모형이 크다."',
+      '"상황이 유형별로 다르다."',
+    ]) {
+      expect(addressCueGender(s)).toBeNull();
+    }
+  });
+
+  test('남/여 호칭이 함께 나오면 판단하지 않는다(3인 대화)', () => {
+    expect(addressCueGender('"형, 언니한테 물어봐."')).toBeNull();
+  });
+
+  test('지문의 호칭은 보지 않는다(대사 안만) — 지문 경로는 기존 규칙 담당', () => {
+    expect(addressCueGender('오빠가 문을 닫았다.')).toBeNull();
+  });
+});
+
+describe('이름 화자 → 성별', () => {
+  const { guessDialogueGender } = require('../lib/speakerGender');
+
+  test('사전에 있는 이름은 화자 성별을 준다', () => {
+    expect(guessDialogueGender('"왔어?" 민준이 물었다.')).toBe('male');
+    expect(guessDialogueGender('"응." 지영이 대답했다.')).toBe('female');
+  });
+
+  test('성까지 붙은 표기도 잡는다', () => {
+    expect(guessDialogueGender('"그래." 김민준이 말했다.')).toBe('male');
+  });
+
+  test('양성 이름은 사전에 없어 미상으로 남는다(넘겨짚지 않는다)', () => {
+    expect(guessDialogueGender('"응." 지수가 말했다.')).toBeNull();
+    expect(guessDialogueGender('"응." 지민이 말했다.')).toBeNull();
+  });
+
+  test('주격 조사가 없으면 단서가 아니다(목적격·여격 = 화자 아님)', () => {
+    expect(guessDialogueGender('"안녕." 민준에게 인사하며 말했다.')).toBeNull();
+    expect(guessDialogueGender('"안녕." 지영을 바라보며 말했다.')).toBeNull();
+  });
+});
+
+// v1.29.0 정밀도 보강: 호칭이 문장 중간의 3인칭 지칭이면 화자 성별을 말해 주지 않는다.
+describe('호칭 단서 — 인정 자리 제한', () => {
+  const { addressCueGender } = require('../lib/speakerGender');
+
+  test('문장 중간의 3인칭 지칭은 버린다', () => {
+    expect(addressCueGender('"그 사람 형이 왔대."')).toBeNull();
+    expect(addressCueGender('"옆집 언니가 그러던데."')).toBeNull();
+    expect(addressCueGender('"민준이 누나가 왔어."')).toBeNull();
+  });
+
+  test('인정 자리 셋은 그대로 인정한다', () => {
+    expect(addressCueGender('"형이 그러던데."')).toBe('male'); // 발화 첫머리
+    expect(addressCueGender('"아니, 오빠 그게 아니고."')).toBe('female'); // 문장부호 뒤(호격)
+    expect(addressCueGender('"우리 형은 안 그래."')).toBe('male'); // 자기 가족
+    expect(addressCueGender('"내 언니가 알려줬어."')).toBe('female');
+  });
+
+  test('"네"가 대답이면(문장부호 뒤) 뒤따르는 호칭은 살아 있다', () => {
+    expect(addressCueGender('"네, 오빠 금방 갈게요."')).toBe('female');
+  });
+});
+
+// 교차검증 Gemini CRITICAL 2026-07-29(전부 실행 재현 후 채택): 2음절 이름은 추상·일반명사와
+// 표기가 겹친다. 그런 문장이 화자 성별을 확정하면 대화 런 전체가 반대로 뒤집힌다.
+describe('이름 사전 — 일반명사 오탐 금지', () => {
+  const { guessDialogueGender, addressCueGender } = require('../lib/speakerGender');
+
+  test('일반명사로 읽히는 낱말은 화자 단서가 아니다', () => {
+    expect(guessDialogueGender('"빨리 가자!" 기차 지연이 발생해 초조해했다.')).toBeNull();
+    expect(guessDialogueGender('"조심해." 지금 필요한 건 지혜가 아니라 용기라고 말했다.')).toBeNull();
+    expect(guessDialogueGender('"잠깐." 지금은 슬기가 필요한 때라고 말했다.')).toBeNull();
+    expect(guessDialogueGender('"멈춰." 경호가 삼엄해서 다가갈 수 없었다.')).toBeNull();
+    expect(guessDialogueGender('"이거." 아름이 눈에 띄었다.')).toBeNull();
+    expect(guessDialogueGender('"봐." 상호가 서로 달랐다.')).toBeNull();
+    expect(guessDialogueGender('"어때." 재현이 어려운 실험이었다.')).toBeNull();
+  });
+
+  test('"지은이"(저자)는 3음절이라 이름 "지은"과 갈린다 — 탐욕적 토큰화가 지켜 준다', () => {
+    expect(guessDialogueGender('"안녕." 이 책의 지은이가 누구인지 몰랐다.')).toBeNull();
+  });
+
+  test('3인칭 복수 관형어 뒤의 호칭도 버린다(너희·당신들·걔네)', () => {
+    expect(addressCueGender('"너희 형은 어디 갔니?"')).toBeNull();
+    expect(addressCueGender('"당신들 언니가 왔어?"')).toBeNull();
+    expect(addressCueGender('"걔네 오빠가 왔대."')).toBeNull();
   });
 });

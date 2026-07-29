@@ -26,7 +26,7 @@ import {
 } from '../lib/sherpaModel';
 import { sherpaStats, type SherpaStats } from '../tts/sherpa/stats';
 import { subtitlesVisible } from '../lib/visibility';
-import { openBatteryOptRequest } from '../lib/batteryOpt';
+import { openBatteryOptWithGuide } from '../lib/batteryOpt';
 import { startBgSound, stopBgSound, setBgVolume } from '../lib/bgSound';
 import { APP_VERSION } from '../lib/config';
 import { stepRateValue, RATE_MAX } from '../lib/rateSteps';
@@ -479,7 +479,7 @@ export default function SettingsScreen() {
         {isEdge
           ? ' 고품질 온라인(Edge)은 2×까지 원음 그대로이고, 그 이상은 소리가 점점 거칠어질 수 있습니다.'
           : isSherpa
-            ? ' 고품질 오프라인은 2.5×까지 원음 그대로이고, 그 이상은 소리가 점점 거칠어질 수 있습니다.'
+            ? ' 고품질 오프라인은 2.1×까지 원음 그대로입니다. 그보다 빠르면 또렷하게 들리도록 조정하면서 음색이 조금 달라질 수 있어요.'
             : ' 아주 빠른 속도의 또렷함은 기기 음성 품질을 따릅니다.'}
       </Text>
       <Row
@@ -722,7 +722,7 @@ export default function SettingsScreen() {
         <>
           <Text style={[styles.section, { color: p.subtext }]}>배경 재생</Text>
           <TouchableOpacity
-            onPress={openBatteryOptRequest}
+            onPress={() => { void openBatteryOptWithGuide(); }}
             style={[styles.bgBtn, { borderColor: p.border }]}
             accessibilityRole="button"
             accessibilityLabel="배터리 최적화 예외 설정 열기"

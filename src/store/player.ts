@@ -23,7 +23,7 @@ import { promptBgReliabilityOnce } from '../lib/batteryOpt';
 import { armWatchdog, disarmWatchdog, noteProgress } from '../lib/playbackWatchdog';
 import { sentenceGapMs } from '../lib/pacing';
 import { playGap, GAP_MIN_MS } from '../lib/gapPlayer';
-import { startBgSound } from '../lib/bgSound';
+import { startBgSound, stopBgSound } from '../lib/bgSound';
 
 // 재생 컨트롤러. 문장 큐를 순회하며 엔진에 발화시키고, onBoundary로 단어 하이라이트를 갱신한다.
 // epoch로 stale 콜백(정지/문장전환 후 뒤늦게 온 콜백)을 무효화한다.
@@ -275,6 +275,23 @@ export const usePlayer = create<PlayerState>((set, get) => {
     }
   };
 
+  // 재생 위치를 못 읽는 엔진(시스템 TTS = expo-speech)의 "정상 발화 예산" 만료 시각.
+  // 이 엔진은 진행률 프로브가 없어 워치독이 볼 수 있는 신호가 하나도 없다 — 시간 예산이
+  // 유일한 상한이다(busy 프로브 주석). 예산은 넉넉하게: 한국어 낭독 6음절/초를 기준으로
+  // 예상 발화 시간을 구하고 3배 여유 + 하한 10초. 정상 발화가 이 예산을 넘길 일은 사실상
+  // 없고(넘겨도 복구는 같은 문장 재발화라 내용 손실은 없다), 죽었을 때는 반드시 끊긴다.
+  const SYS_SYLLABLES_PER_SEC = 6;
+  const SYS_BUDGET_MARGIN = 3;
+  const SYS_BUDGET_FLOOR_MS = 10_000;
+  let segBudgetUntil = 0;
+  const systemBudgetMs = (text: string, rate: number): number => {
+    const r = Number.isFinite(rate) && rate > 0 ? rate : 1;
+    return (
+      SYS_BUDGET_FLOOR_MS +
+      (text.length / (SYS_SYLLABLES_PER_SEC * r)) * 1000 * SYS_BUDGET_MARGIN
+    );
+  };
+
   // 화면 꺼짐 낭독 정체 복구(v1.28.0 — playbackWatchdog.ts). 연속 실패가 쌓이면 포기하고
   // 사용자에게 알린다(무한 재시도로 배터리를 태우지 않게). 정상 진행 시 0 으로 리셋.
   let stallRecoveries = 0;
@@ -298,13 +315,20 @@ export const usePlayer = create<PlayerState>((set, get) => {
       stopMediaSession(); // 워치독 해제(disarm)도 여기서 중앙 처리된다
       return;
     }
-    stallRecoveries++;
+    // ⚠️ 카운터의 의미 = "복구했는데도 **진행이 없었던** 연속 횟수"(교차검증 codex CRITICAL
+    // 2026-07-29). 종전엔 복구를 시도할 때마다 무조건 올렸는데, 완료 통지가 계속 유실되지만
+    // 오디오는 매번 정상 완주하는 환경(=이 워치독이 노리는 대표 장애)에서는 복구가 성공하는
+    // 중에도 카운터가 쌓여, 4번째 문장에서 "포기" 분기에 걸려 낭독이 통째로 중단됐다.
+    // 안전망이 딱 세 문장만 버티고 스스로 죽는 구조였다. 실제로 다음 발화 단위로 넘어갔다면
+    // 그건 실패가 아니므로 0 으로 되돌린다.
     if (pendingGap) {
       // 쉼(무음 재생)의 완료 신호가 유실된 것 — 예약돼 있던 다음 문장으로 진행.
+      stallRecoveries = 0;
       const next = pendingGap.nextIndex;
       clearPendingGap(false);
       set({ index: next, wordStart: 0, wordLen: 0 });
     } else if (activeEngine.finishedButIdle?.()) {
+      stallRecoveries = 0;
       // ⚠️ 급소(교차검증 codex CRITICAL 2026-07-26): 오디오는 끝까지 재생됐는데 완료 통지만
       // 유실된 경우다 — 이게 바로 이 워치독이 노리는 대표 장애다. 여기서 현재 문장을 다시
       // 발화하면 "다 읽은 문장을 처음부터 반복"이 되어, 고치려던 것보다 나쁜 증상을 만든다.
@@ -323,8 +347,10 @@ export const usePlayer = create<PlayerState>((set, get) => {
         return;
       }
       set({ index: st.index + 1, wordStart: 0, wordLen: 0 });
+    } else {
+      // 진행 없이 같은 문장을 다시 발화한다 = 이번 복구는 실패로 센다(반복되면 포기).
+      stallRecoveries++;
     }
-    // 그 외(재생이 중간에서 죽음·시작 자체가 안 됨)는 현재 문장을 다시 발화한다.
     speakCurrent();
   };
 
@@ -357,9 +383,16 @@ export const usePlayer = create<PlayerState>((set, get) => {
     armWatchdog(
       {
         progressMs: () => activeEngine.progressMs?.() ?? null,
-        // 프로브 미구현 엔진(시스템 TTS)은 "항상 준비 중"으로 둬 워치독이 손대지 않게 한다.
-        // busy 만 미구현인 엔진이 생겨도 안전한 쪽(true)으로 기운다.
-        busy: () => (activeEngine.progressMs ? (activeEngine.busy?.() ?? true) : true),
+        busy: () => {
+          if (activeEngine.progressMs) return activeEngine.busy?.() ?? true;
+          // ⚠️ 재생 위치를 못 읽는 엔진(시스템 TTS)을 "항상 준비 중"으로 두면 안 된다
+          // (교차검증 codex CRITICAL 2026-07-29). 그러면 워치독이 매 틱 시계를 되돌려
+          // 영구히 무력해지고, 시스템 TTS 가 조용히 죽어도 playing 이 true 로 남는다 —
+          // 그 상태에서는 stopMediaSession 이 한 번도 안 불려 432Hz 배경음이 무한정 돌고
+          // (v1.29.0 부터는 웨이크락까지 붙잡는다) 사용자 보고 1·3번이 그대로 재현된다.
+          // 대신 발화 길이에서 계산한 시간 예산 안에서만 "준비 중"으로 본다.
+          return Date.now() < segBudgetUntil;
+        },
       },
       recoverFromStall,
     );
@@ -451,6 +484,8 @@ export const usePlayer = create<PlayerState>((set, get) => {
       // 책이 통째로 조기 종료됐다).
       resumeSegment = { epoch: myEpoch, si, count: segs.length, run: speakSegment };
       const seg = segs[si];
+      // 진행률 프로브가 없는 엔진용 시간 예산(위 주석). 세그먼트마다 새로 잡는다.
+      segBudgetUntil = Date.now() + systemBudgetMs(seg.text, settings.rate);
       const engId = fellBack ? 'system' : engineId;
       const eng = fellBack ? systemEngine : engine;
       const handlers = {
@@ -765,6 +800,15 @@ export const usePlayer = create<PlayerState>((set, get) => {
       });
     },
   };
+});
+
+// 432Hz 배경 앰비언트의 불변식: **낭독이 돌지 않는데 배경음만 남는 일은 없다**.
+// 정상 경로는 stopMediaSession 이 함께 끄지만(bgSound.ts), 배경음은 무한 루프라 한 번
+// 새어 나가면 화면을 꺼 둔 사용자가 알아채기 전까지 몇 시간이고 돌며 배터리를 태운다
+// (사용자 보고 2026-07-29 "낭독이 끝나면 432Hz도 꺼져야 되는데 안 꺼져서 배터리 엄청 먹음").
+// 새 정지 경로가 생기거나 예외로 중간이 끊겨도 여기서 반드시 잡히게 상태 자체에 건다.
+usePlayer.subscribe((s, prev) => {
+  if (prev.playing && !s.playing) stopBgSound();
 });
 
 // 잠금화면/알림의 ▶·⏸ 는 네이티브가 앵커 플레이어를 직접 제어한다 — 그 상태 변화를

@@ -1,8 +1,24 @@
 diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt
-index c76a9fd..38fcfdf 100644
+index c76a9fd..5b84cf1 100644
 --- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt
 +++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/AudioPlayer.kt
-@@ -181,7 +181,9 @@ class AudioPlayer(
+@@ -84,6 +84,15 @@ class AudioPlayer(
+   }
+ 
+   init {
++    // PATCH(iwtts): 재생 중 부분 웨이크락 유지. expo-audio 원본은 setWakeMode 를 전혀 호출하지
++    // 않아(소스 전수 검색 0건) 화면을 끄고 기기가 절전에 들어가면 ExoPlayer 의 재생 스레드와
++    // 상태 콜백이 스케줄되지 않는다 — 이미 버퍼에 실린 소리(무한 루프 배경음)는 계속 나는데
++    // "다음 문장 시작"은 영영 오지 않는 증상이 된다(사용자 보고 2026-07-29 "화면 끄면 낭독은
++    // 멈추는데 432Hz 배경음은 계속 남"). mediaPlayback 포그라운드 서비스는 프로세스가 얼거나
++    // 죽는 것만 막을 뿐 기기 자체의 suspend 를 막지 못한다 — 그건 웨이크락의 일이고, Media3 가
++    // 그 용도로 제공하는 표준 API 가 setWakeMode 다. WAKE_LOCK 권한은 매니페스트에 이미 있다
++    // (없으면 Media3 는 경고만 남기고 무시하므로 크래시 위험 없음).
++    ref.setWakeMode(C.WAKE_MODE_LOCAL)
+     installPlayerListeners()
+     source?.let {
+       setMediaSource(source)
+@@ -181,7 +190,9 @@ class AudioPlayer(
    }
  
    override fun setPlaybackRate(rate: Float) {

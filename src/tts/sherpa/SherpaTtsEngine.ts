@@ -11,6 +11,7 @@ import {
   sherpaTempoComp,
   sherpaRubato,
   sherpaPaceComp,
+  trimFactorBudget,
 } from './rate';
 import { disposePlayer } from '../disposePlayer';
 import {
@@ -29,6 +30,7 @@ import { makeBreathSamples, speechStats, breathDurMs } from './breathWav';
 import { estimateWordBoundaries, type WordBoundary } from './align';
 import { recordSynth, recordStarvation, recordPlaybackProgress } from './stats';
 import { subtitlesVisible, onVisibilityChange } from '../../lib/visibility';
+import { synthWaitIsNormal, SYNTH_GRACE_MS } from '../../lib/playbackWatchdog';
 
 // trimFactor: 스마트 스피드(무음 압축)로 이미 번 배속(미압축=1) — 재생속도에서 이만큼 덜어낸다.
 // tempoComp·rubatoRaw: 이 문장의 완급 인자(텍스트 순수 함수 — 합성 시 계산해 실어 둔다).
@@ -119,6 +121,10 @@ const END_RATIO = 0.9;
 // 재생 시작을 "정상적으로 기다려 주는" 상한(ms). 이 시간을 넘도록 재생에 못 들어가면
 // 준비 중이 아니라 고장으로 보고 워치독에 넘긴다(busy 주석).
 const START_GRACE_MS = 8_000;
+// 실제 디코더 버퍼링을 "정상 준비 중"으로 봐 주는 상한(ms). 시작 유예(START_GRACE_MS)와
+// 분리한다 — 저사양 기기의 버퍼링이 8초를 넘길 수 있는데, 그걸 시작 실패로 묶으면 정상
+// 재생을 끊는다(교차검증 codex CRITICAL 2026-07-29).
+const BUFFER_GRACE_MS = 30_000;
 // 낱자 없는 발화의 무음 길이(파일에 굽는 값 — 재생 스트레치로 배속 비례 축소).
 const SILENT_UTTERANCE_MS = 600;
 // 낱자(문자·숫자) 판정 — 무음 발화 분기(doSynthesize)용.
@@ -197,6 +203,8 @@ export class SherpaTtsEngine implements TtsEngine {
   private currentRubatoOn = false;
   // 이번 발화의 재생 시작 시도 시각 — busy() 의 "준비 중" 판정에 상한을 두기 위한 기준점.
   private playStartedAt = 0;
+  // 지금 기다리는 합성(pendingSynth)을 요청한 시각 — 합성 대기 상한(SYNTH_GRACE_MS) 기준점.
+  private pendingSynthAt = 0;
 
   speak(text: string, params: SpeakParams, handlers: SpeakHandlers): void {
     const myGen = ++this.playGen;
@@ -221,6 +229,7 @@ export class SherpaTtsEngine implements TtsEngine {
       entry = this.makeSynth(text, params);
     }
     this.pendingSynth = entry;
+    this.pendingSynthAt = Date.now();
     // 발화 시작까지 실제로 기다린 시간 = 파이프라인이 말랐는지의 직접 증거(stats.ts).
     // 캐시 히트(합성 완료분)면 0 에 수렴하고, 마르면 그 대기가 곧 낭독 리듬의 흔들림이다.
     const askedAt = Date.now();
@@ -431,15 +440,23 @@ export class SherpaTtsEngine implements TtsEngine {
    *  준비 중인 재생을 끊는다(교차검증 codex 2026-07-26 — Media3 는 prepare 후 BUFFERING 을
    *  거치며 그동안 currentTime 은 0 에 머문다). */
   busy(): boolean {
-    if (this.pendingSynth) return true;
+    // ⚠️ 합성 대기에도 반드시 상한이 있어야 한다. 상한 없이 pendingSynth 만 보면 합성 체인이
+    // 한 번 막힌 순간부터 이 함수가 영원히 true 를 돌려 워치독이 매 틱 시계를 되돌린다 —
+    // 복구가 영영 호출되지 않아 안전망 자체가 죽는다(SYNTH_GRACE_MS 주석).
+    if (this.pendingSynth) return synthWaitIsNormal(this.pendingSynthAt, SYNTH_GRACE_MS);
     const p = this.player;
     if (!p) return false;
     // ⚠️ "준비 중" 판정에는 반드시 시간 상한이 있어야 한다(교차검증 codex CRITICAL
     // 2026-07-26): 재생이 시작조차 못 하고 죽으면(playing=false, currentTime=0) 이 함수가
     // 영원히 true 를 돌려 워치독이 매 틱 시계를 되돌린다 — 복구가 영영 호출되지 않는다.
-    if (Date.now() - this.playStartedAt > START_GRACE_MS) return false;
+    const waited = Date.now() - this.playStartedAt;
     try {
-      if (p.isBuffering) return true;
+      // ⚠️ 실제 버퍼링은 시작 유예보다 오래 갈 수 있다(교차검증 codex CRITICAL 2026-07-29):
+      // 종전엔 START_GRACE_MS 만료 검사가 isBuffering 검사보다 먼저라, 8초를 넘겨 버퍼링하는
+      // 저사양 기기에서 **정상 준비 중인 재생**을 정체로 오판해 끊었다. STALL_MS 를 6초로
+      // 내리며 그 오판 시점이 더 앞당겨진다. 버퍼링에는 더 넉넉한 자기 상한을 준다.
+      if (p.isBuffering && waited <= BUFFER_GRACE_MS) return true;
+      if (waited > START_GRACE_MS) return false;
       // 아직 재생에 들어가지 않았다 = 준비 중(일시정지는 워치독이 해제돼 있어 여기 안 온다).
       if (!p.playing && (p.currentTime || 0) <= 0) return true;
     } catch {
@@ -820,8 +837,20 @@ export class SherpaTtsEngine implements TtsEngine {
     let speechMs = Infinity;
     if (sherpaTrimEnabled(params.rate)) {
       const c = compressSilence(rawSamples, sampleRate);
-      samples = c.samples;
-      trimFactor = c.factor;
+      // ⚠️ 압축이 지나치면 곱 불변식(모델 × 압축 × 재생속도 = 설정 배속)이 깨진다
+      // (교차검증 codex 2026-07-29): 필요한 재생속도가 expo-audio 하한(0.5)보다 낮아지면
+      // sherpaPlaybackRate 가 0.5 로 클램프해 **설정보다 빠르게** 재생된다. 압축 몫이
+      // 예산을 넘으면 압축 자체를 포기해(원본 사용) 배속 계약을 지킨다. 실측 압축비는
+      // f≈1.1~1.3 이라 이 분기는 거의 도달하지 않는다 — 계약 파손 방지용 안전판이다.
+      // 압축 몫을 줄여서 보고하면 안 된다 — 파일은 이미 그만큼 짧아져 있어서 그러면 오히려
+      // 더 빨라진다. 예산을 넘으면 압축분을 통째로 버리고 원본을 쓴다(안전한 방향).
+      if (c.factor <= trimFactorBudget(params.rate)) {
+        samples = c.samples;
+        trimFactor = c.factor;
+      } else {
+        samples = Array.from(rawSamples);
+        trimFactor = 1;
+      }
     } else {
       // 짧은 문장은 머리 여유를 키운다(배속 비례 — "짧은 말 씹힘" 대책, smartSpeed.ts).
       // ⚠️ 패드는 반드시 leadPadOf(키 계산과 동일 함수) — 갈리면 캐시 키=오디오 정합이 깨진다.

@@ -48,15 +48,25 @@ describe('sentenceGapMs', () => {
     expect(at1(long, P)).toBeGreaterThan(at1(mid, P));
   });
 
-  test('배속 비례 축소·>3× 는 0·상한 700+지터50', () => {
+  test('배속에 따라 축소되되 선형은 아니다·>3× 는 0·상한 700+지터50', () => {
     const heavy = '"그건 좀…"';
-    const v1 = sentenceGapMs(heavy, '"뭐가?"', { paragraphBreak: true, rate: 1 });
-    const v2 = sentenceGapMs(heavy, '"뭐가?"', { paragraphBreak: true, rate: 2 });
+    const at = (rate: number) => sentenceGapMs(heavy, '"뭐가?"', { paragraphBreak: true, rate });
+    const v1 = at(1);
+    const v2 = at(2);
+    const v3 = at(3);
     // 극적 조합(문단+말줄임+대화=750)도 상한 700에서 잘리되 지터(±50)는 살아 있다.
     expect(v1).toBeGreaterThanOrEqual(650);
     expect(v1).toBeLessThanOrEqual(750);
-    expect(Math.abs(v2 - Math.round(v1 / 2))).toBeLessThanOrEqual(1);
-    expect(sentenceGapMs(heavy, '"뭐가?"', { paragraphBreak: true, rate: 3.5 })).toBe(0);
+    // 배속이 오르면 쉼은 짧아진다(단조 감소).
+    expect(v2).toBeLessThan(v1);
+    expect(v3).toBeLessThan(v2);
+    // v1.29.0: 선형(÷배속)보다는 길게 남는다 — 조음보다 쉼을 덜 압축하는 사람 낭독에 맞춘
+    // 설계(gapDivisor 주석). 이 부등식이 깨지면 고배속에서 문장 경계가 다시 사라진다.
+    expect(v2).toBeGreaterThan(Math.round(v1 / 2));
+    expect(v3).toBeGreaterThan(Math.round(v1 / 3));
+    // 그렇다고 압축을 포기하진 않는다 — 3× 에서 원래의 절반 아래로는 내려간다.
+    expect(v3).toBeLessThan(v1 * 0.5);
+    expect(at(3.5)).toBe(0);
   });
 
   test('경계 입력 — 빈 문자열·0 이하 배속(방어)도 안전', () => {

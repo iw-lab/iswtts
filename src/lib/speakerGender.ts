@@ -86,6 +86,128 @@ function speechVerbHits(narration: string): Array<{ idx: number; text: string }>
 
 export type SpeakerGender = 'male' | 'female';
 
+// ── 대사 안의 호칭 단서(v1.29.0) ────────────────────────────────
+//
+// 왜 필요한가(실측 2026-07-29): v1.28.0 은 지문 앵커가 하나도 없는 대화 런을 "기본 화자의
+// 반대 성별부터 교대"로 채웠다. 교대 자체는 맞지만 **누가 먼저 말하는가(위상)는 동전
+// 던지기**였다 — 같은 코퍼스가 시드에 따라 100% ↔ 0% 로 통째로 뒤집히는 것을 재현했다.
+// 위상이 틀리면 그 대화의 모든 줄이 반대 성별로 들린다(사용자 보고 "남녀 대화 더 확실히").
+//
+// 한국어 호칭은 **부르는 사람의 성별**을 드러낸다 — 지문이 한 줄도 없어도 대사 안에서
+// 화자 성별을 직접 읽어낼 수 있는 거의 유일한 단서다:
+//   오빠·언니 → 부르는 사람이 여성 / 형·누나 → 부르는 사람이 남성
+// 이 단서는 "누가 말했다" 만큼 직접적이라 최고 확신 앵커로 쓴다.
+const ADDR_FEMALE_SPEAKER = '오빠|언니';
+// ⚠️ 더 긴 어휘가 먼저(정규식 alternation 은 선순위 매치) — 이 파일 SPEECH_NOUN 주석과 같은
+// 규칙. 지금은 '형'과 '형님'이 둘 다 남성이라 결과가 같지만, 순서 규칙을 깨 두면 나중에
+// 성별이 다른 접미 호칭을 넣을 때 조용히 틀린다.
+const ADDR_MALE_SPEAKER = '형님|누님|누나|형';
+// 호칭 뒤에 올 수 있는 것: 문장부호·공백·끝(호격) 또는 조사/접미(오빠는·형이·누나한테·형님께).
+// ⚠️ 이 뒤따름 제한이 없으면 '형'이 형태·형사·형편·형제·형성 따위에 전부 걸린다.
+const ADDR_TAIL = '(?:(?![가-힣])|(?=[은는이가도를야아님께한에랑과의씨]))';
+// 앞이 한글이면 복합어다(인형·모형·유형·변형). 앞이 3인칭 관형어면 남의 오빠/형 이야기라
+// 화자 성별을 말해 주지 않는다("네 오빠는 뭐 해?" — 화자는 남녀 아무나 될 수 있다).
+const ADDR_THIRD_PERSON = /(?:네|니|당신|그|그녀|걔|쟤|얘|그쪽|저쪽|누구)\s*$/;
+
+function addrRe(words: string): RegExp {
+  return new RegExp(`(^|[^가-힣])(${words})${ADDR_TAIL}`, 'g');
+}
+const ADDR_F_RE = addrRe(ADDR_FEMALE_SPEAKER);
+const ADDR_M_RE = addrRe(ADDR_MALE_SPEAKER);
+
+/** 대사(따옴표 안) 텍스트만 이어 붙인다 — 호칭 단서는 지문이 아니라 대사 안에 있다. */
+function quotedText(sentence: string): string {
+  QUOTE_SPANS.lastIndex = 0;
+  const parts = sentence.match(QUOTE_SPANS);
+  return parts ? parts.join(' ') : '';
+}
+
+// 화자 단서로 인정하는 "위치". 호칭이 문장 중간에 다른 명사 뒤로 오면 남의 형/오빠를
+// 가리키는 3인칭 지칭일 수 있다("그 사람 형이 왔대" — 화자 성별과 무관). 그런 자리는 버리고
+// ① 발화 첫머리 ② 문장부호 뒤(호격) ③ 우리/내/제/저희 뒤(자기 가족) 만 인정한다.
+const ADDR_STRICT_PRE = /(?:^|[“”"「」『』‘’']|[,.!?…、·~]|(?:^|[^가-힣])(?:우리|내|제|저희))$/;
+
+/** 화자 단서로 쓸 수 있는 자리에 있는가(위 세 자리). */
+function addrStrictHit(text: string, re: RegExp): boolean {
+  re.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    const termStart = m.index + m[1].length;
+    const pre = text.slice(0, termStart);
+    if (ADDR_THIRD_PERSON.test(pre)) continue; // 네/그녀/걔 … = 남의 형·오빠
+    if (ADDR_STRICT_PRE.test(pre.trimEnd())) return true;
+  }
+  return false;
+}
+
+/** 자리를 가리지 않고 그 호칭이 발화 안에 등장하기는 하는가(반대 성별 오염 검사용). */
+function addrAnyHit(text: string, re: RegExp): boolean {
+  re.lastIndex = 0;
+  return re.test(text);
+}
+
+/**
+ * 대사 안의 호칭으로 **말하는 사람**의 성별을 읽는다. 지문이 전혀 없는 연속 대화에서
+ * 위상(누가 먼저인가)을 고정하는 유일한 근거다.
+ *
+ * 판정: 한쪽 성별의 호칭이 **인정 자리**에 있고, 반대 성별 호칭은 발화 어디에도 없을 때만
+ * 확정한다. 반대쪽이 자리에 상관없이 한 번이라도 보이면(3인 대화 "형, 언니한테 물어봐")
+ * 누가 화자인지 텍스트만으로 못 가르므로 미상으로 둔다.
+ */
+export function addressCueGender(sentence: string): SpeakerGender | null {
+  const q = quotedText(sentence);
+  if (!q) return null;
+  const f = addrStrictHit(q, ADDR_F_RE);
+  const m = addrStrictHit(q, ADDR_M_RE);
+  if (f && m) return null;
+  if (f) return addrAnyHit(q, ADDR_M_RE) ? null : 'female';
+  if (m) return addrAnyHit(q, ADDR_F_RE) ? null : 'male';
+  return null;
+}
+
+// ── 이름 화자(v1.29.0) ─────────────────────────────────────────
+//
+// 현대 소설의 지문은 "그가/여자가"보다 이름을 훨씬 많이 쓴다("민준이 잔을 내려놓았다").
+// 이 파일은 오랫동안 이름을 의도적으로 배제했는데(상단 주석 "과욕은 오귀속을 늘린다"),
+// 그 판단은 "성별을 틀리게 맞히느니 미상이 낫다"는 전제 위에 있었다. v1.28.0 에서 미상이
+// 곧 "런 전체가 한 목소리 또는 위상 반전"이 되면서 그 전제가 깨졌다 — 이제는 근거 있는
+// 추정이 미상보다 확실히 낫다. 대신 **모호한 이름은 아예 넣지 않는다**(지수·지민·유진 같은
+// 양성 이름은 제외 — 틀린 앵커 하나가 대화 전체를 뒤집는다).
+//
+// ⚠️ **일반명사와 겹치는 이름은 반드시 뺀다**(교차검증 Gemini 2026-07-29, 전부 실행 재현):
+//   "기차 지연이 발생해" → 여성 / "필요한 건 지혜가 아니라" → 여성 / "경호가 삼엄해서" → 남성
+//   "아름이 눈에 띄었다" → 여성 / "슬기가 필요한 때" → 여성
+// 2음절 한자어 이름은 추상명사와 표기가 자주 겹친다. 지혜·아름·슬기·지연·정미(여) ·
+// 재현·상호·경호·상근(남)을 뺐다. 이 목록에 이름을 추가할 때는 **그 두 글자가 주격 조사와
+// 함께 일반 문장에 나올 수 있는지**를 먼저 자문할 것.
+// 남은 완화 장치: 발화 동사가 없는 지문의 이름 단서는 weight 1(약한 앵커)이라, 더 확실한
+// 근거가 하나라도 있으면 진다. 그래도 근거가 그것뿐인 대화에선 시드가 되므로 목록 정밀도가
+// 최후 방어선이다.
+const NAME_FEMALE = new Set(
+  ('지영 수진 은영 미영 지은 현주 서연 서윤 하은 예은 채원 다은 지현 소연 은지 미경 영희 ' +
+    '순자 영숙 경희 현숙 나연 유나 소영 혜진 은주 미현 선영 경미 수경 ' +
+    '유정 은경 현정 수연 민정 혜원 수아 서아 하윤 예린 정연 미연 옥순 ' +
+    '말순 순덕 영자 명자 순희 복희 미란 혜숙 경숙 인숙 명숙 은숙 춘자 영란').split(/\s+/),
+);
+const NAME_MALE = new Set(
+  ('민준 서준 도윤 예준 주원 준우 지훈 건우 우진 현우 정우 승현 태현 동현 상현 영수 ' +
+    '철수 민수 정호 상철 병철 종석 대호 광수 진호 성호 재훈 승우 기훈 태호 준혁 지환 도현 ' +
+    '성훈 영철 만수 덕수 창수 종수 병수 영호 명호 재호 동수 인호 형택 두식 ' +
+    '판석 갑수 만식 춘배 덕배 영식 병식 태식 상우 재우 민호 태우 동우 진우 광호').split(/\s+/),
+);
+// 주격류 조사가 뒤따르는 한글 토큰(다른 단서와 같은 조건 — 여격·목적격 청자를 배제한다).
+// 성까지 붙은 표기("김민준이")도 잡히도록 뒤 2~3음절도 함께 조회한다.
+const NAME_TOKEN = /(^|[^가-힣])([가-힣]{2,4})(?=[가이은는도])/g;
+
+function nameGender(tok: string): SpeakerGender | null {
+  for (const cand of [tok, tok.slice(-3), tok.slice(-2)]) {
+    if (cand.length < 2) continue;
+    if (NAME_FEMALE.has(cand)) return 'female';
+    if (NAME_MALE.has(cand)) return 'male';
+  }
+  return null;
+}
+
 type Cue = { idx: number; gender: SpeakerGender };
 
 function cuesIn(narration: string): Cue[] {
@@ -98,6 +220,12 @@ function cuesIn(narration: string): Cue[] {
   collect(FEMALE_CUES, 'female');
   collect(MALE_CUES, 'male');
   collect(HE_PRONOUN, 'male');
+  NAME_TOKEN.lastIndex = 0;
+  let nm: RegExpExecArray | null;
+  while ((nm = NAME_TOKEN.exec(narration))) {
+    const g = nameGender(nm[2]);
+    if (g) out.push({ idx: nm.index + nm[1].length, gender: g });
+  }
   return out.sort((a, b) => a.idx - b.idx);
 }
 
@@ -269,8 +397,20 @@ function anchorsFor(
   const out: Array<Anchor | null> = new Array(n).fill(null);
   for (let i = 0; i < n; i++) {
     if (!isTurn[i]) continue;
+    // 같은 문장에 "누가 말했다"가 박혀 있으면 그게 최우선(명시적 귀속).
+    if (detail[i]?.strong) {
+      out[i] = { gender: detail[i]!.gender, weight: 3 };
+      continue;
+    }
+    // 대사 안의 호칭(오빠·형 …)은 **말하는 사람 자신**을 가리키므로 지문 추정보다 직접적이다.
+    // 지문 앵커가 하나도 없는 대화 런에서 위상을 고정하는 유일한 근거이기도 하다.
+    const addr = addressCueGender(sentences[i]);
+    if (addr) {
+      out[i] = { gender: addr, weight: 3 };
+      continue;
+    }
     if (detail[i]) {
-      out[i] = { gender: detail[i]!.gender, weight: detail[i]!.strong ? 3 : 1 };
+      out[i] = { gender: detail[i]!.gender, weight: 1 };
       continue;
     }
     const before = narr(i - 1);
@@ -425,5 +565,17 @@ function assignByAlternation(
 // Supertonic 3 화자(sid 0~9)의 성별 — F0 자기상관 실측(2026-07-20, sid_gender.py):
 // 0~4 = 여(172~253Hz), 5~9 = 남(85~151Hz). Supertone 배포의 voice_styles F1~F5/M1~M5
 // 명명과 일치. 배열 순서 = 대사 음성으로 고를 때의 선호 순(음색 대비가 또렷한 순).
+//
+// v1.29.0 화자 낭독 적합도 실측(voice_fit.py / voice_rank.py, 2026-07-29) — 결론은
+// **대부분 재현되지 않았다**. 기록해 둔다(같은 실험을 또 하지 않도록):
+//   · 1× 명료도는 화자 10명이 사실상 동일(CER 0.015~0.037) — 고를 이유가 없다.
+//   · 3× 견고함은 화자별로 최대 4배 차이가 났지만, 표본을 6→12 문장으로 늘리고 분담을
+//     v1.29 값으로 바꿔 다시 재니 **순위가 뒤집혔다**(sid 8: 2위→9위, sid 5: 6위→1위).
+//     표준오차(±0.03~0.07)가 순위 간 차이보다 크다 = 중위권 순서는 노이즈다.
+//   · 두 측정에서 **일관된 것은 sid 7 이 두 번 다 꼴찌**라는 것 하나(0.758 / 0.539).
+//     그래서 sid 7 만 대사 음성 선호 2순위 → 마지막으로 내린다. 나머지 순서는 근거가
+//     없으므로 종전(음색 대비 순)을 그대로 둔다.
+//   · F0 변동폭·발화속도 지표는 측정 자체가 오염됐다(무음 패딩이 짧은 문장 길이를 지배) —
+//     그 수치로는 아무 결론도 내리지 않았다.
 export const SHERPA_FEMALE_SIDS = ['1', '3', '2', '4', '0'];
-export const SHERPA_MALE_SIDS = ['6', '7', '8', '5', '9'];
+export const SHERPA_MALE_SIDS = ['6', '8', '5', '9', '7'];

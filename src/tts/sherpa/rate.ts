@@ -6,9 +6,9 @@
 // - 재생 스트레치(피치보정) 솔로(자연속도 소스): 2.0=10%, 3.0=18%, 3.2=22%, 3.5=62%(절벽).
 // - 총 3.2× 초과에서는 "스트레치 고정 + 초과분 모델"이 순수 스트레치보다 우수
 //   (3.6×: 조합38% vs 순수62% / 4.0×: 조합48% vs 순수76%).
-// → 분담: 스트레치가 **2.5×**까지 우선 → 초과분은 모델(무음 경계 3.0 클램프) → 잔여는
+// → 분담: 스트레치가 **2.1×**까지 우선 → 초과분은 모델(무음 경계 3.0 클램프) → 잔여는
 //   다시 스트레치(하드맥스 10, expo-audio 패치 상한과 일치).
-//   ⚠️ 이 경계는 v1.28.0에서 3.0 → 2.5 로 내렸다(재실측 근거는 SONIC_FIRST_MAX 주석).
+//   ⚠️ 이 경계는 v1.28.0에서 3.0 → 2.5, v1.29.0에서 2.5 → 2.1 로 내렸다(근거는 SONIC_FIRST_MAX 주석).
 //   위 CER 수치들은 v1.11 시절 실측이고 같은 도구로 재현되지 않았다 — 현재 유효한 근거는
 //   SONIC_FIRST_MAX 주석의 2026-07-26 실측이다.
 // + 스마트 스피드(v1.11.0): >3×에서는 합성 오디오의 긴 쉼을 먼저 압축(smartSpeed.ts,
@@ -18,27 +18,33 @@
 import { endsWithEllipsis } from '../../lib/pacing';
 
 export const SHERPA_QUALITY_MAX = 3.2; // 품질 무손상 임계(시스템 음성 전환 옵션의 기준점)
-// 스트레치 단독 온전 상한. v1.28.0: 3.0 → 2.5(실측 2026-07-26, rate_quality2.py — 과거
-// 기록과 같은 도구·같은 파라미터로 재측정).
-//   스트레치 단독 CER: 1.5×/2.0× = 1% (온전) → 2.5× = 23% → 3.0× = 붕괴
-//   3.0× 를 만드는 두 방법: 스트레치 3.0 단독 CER 0.696 vs 모델 1.25 × 스트레치 2.4 = 0.327
-// 즉 3× 부근에서 스트레치 단독은 알아듣기 어려워진다. 다만 모델 speed 는 F0(음높이)를 함께
-// 바꾸므로(tone_probe EXP2) 음색은 스트레치가 유리하다 — mel 거리는 반대 방향(1.88 vs 2.27).
-// 그래서 경계를 2.5 로만 내린다: 통상 감상 구간(≤2.5×)은 종전과 100% 동일하게 음색을 지키고
-// (2.0× 실측에서 모델 혼합은 CER 8배 악화 — 저배속의 모델 개입은 확실히 해롭다), 훑어 듣는
-// 3× 부근에서만 명료도를 위해 모델이 초과분을 분담한다.
+// 스트레치 단독 온전 상한. **v1.29.0: 2.5 → 2.1**(사용자 요청 2026-07-29 "배속시 더
+// 노력해봐", 상시 사용 배속 2.5~3.0×).
+//
+// v1.28.0 은 3.0× 에서 두 점만 비교해 "분담이 낫다"만 확인하고 경계를 2.5 로 놨다 —
+// **어느 비율이 최선인지는 재지 않았다**. v1.29.0 에서 격자로 훑고(split_grid.py), 결론이
+// 타깃마다 어긋나 노이즈로 판명돼 결정 지점만 표본 4배(문장 12 × 화자 2 = 24)로 짝비교
+// 재측정했다(split_confirm.py, 2026-07-29):
+//   2.5×  model 1.0(구) CER 0.216 → model 1.2 **0.123**  (문장별 개선 14 / 악화 6)
+//   3.0×  model 1.2(구) CER 0.399 → model 1.4 **0.309**  (평균차 −0.090)
+// 두 최적점이 가리키는 경계가 같다: 2.5/1.2 = 2.083, 3.0/1.4 = 2.143 → **2.1**.
+// 독립된 두 타깃이 같은 값으로 수렴한 것이 이 상수의 근거다.
+//
+// 대가(정직하게): 모델 speed 는 F0 를 함께 바꾸므로 음색이 원음에서 더 멀어진다
+// (mel 거리 2.5× 27.5 → 30.1). 명료도를 위해 음색 변화를 감수하는 교환이다.
+// 2.0× 이하는 종전과 100% 동일하다 — 그 구간의 모델 개입은 CER 8배 악화로 이미 확인됐다.
 // ⚠️ 이 실측의 스트레치는 WSOLA 간이판이고 앱의 실제 재생은 Android Media3 의 Sonic 이다 —
-// 같은 시간영역 계열이지만 동일 구현은 아니므로, 절벽의 정확한 위치는 실기기 청감으로
-// 확인할 것. 그래서 2.5 이하(사용자가 실제로 쓰는 구간)는 건드리지 않았다.
-const SONIC_FIRST_MAX = 2.5;
+// 같은 시간영역 계열이지만 동일 구현은 아니다. 절벽의 정확한 위치는 실기기 청감으로 확인할 것.
+const SONIC_FIRST_MAX = 2.1;
 // 스마트 스피드(무음 압축) 시작 배속. ⚠️ SONIC_FIRST_MAX 와 분리해 둔다(v1.28.0) — 예전엔
 // 같은 상수를 공유해서, 스트레치 경계를 내리면 무음 압축까지 함께 켜져 낭독 리듬이 통째로
 // 바뀔 뻔했다. 이쪽은 "훑어 듣기" 기능이라 종전 3.0 을 유지한다.
 const SMART_SPEED_MIN = 3.0;
 const MODEL_MAX = 3.0; // 모델 speed ≥4.0 = 전 구간 무음(실측) — 하드 경계
 const PLAYBACK_HARD_MAX = 10.0; // expo-audio 패치(coerceIn 상한)와 일치
+const PLAYBACK_MIN = 0.5; // expo-audio 재생속도 하한(coerceIn) — trimFactorBudget 의 근거
 
-// 모델이 분담할 배수. 저속(≤1×)은 모델 전담, 스트레치 온전 구간(≤3×)은 모델 개입 금지,
+// 모델이 분담할 배수. 저속(≤1×)은 모델 전담, 스트레치 온전 구간(≤SONIC_FIRST_MAX)은 모델 개입 금지,
 // 그 초과분만 모델이 흡수한다.
 export function sherpaModelSpeed(rate?: number): number {
   const r = Number.isFinite(rate as number) ? (rate as number) : 1.0;
@@ -149,6 +155,16 @@ export function sherpaPaceComp(
 // 문장 "안"에서 앞이 느리고 뒤가 빨라지던 진짜 원인은 청크 길이 편차였고, 그건 chunkKo 의
 // 균등 분배로 잡았다(재생 속도를 건드리지 않으므로 ②와 충돌하지 않는다).
 
+/** 무음 압축이 가져가도 되는 최대 몫 — 이보다 크면 필요한 재생속도가 expo-audio 하한(0.5)
+ *  아래로 내려가 클램프에 걸리고, 그 순간 "모델 × 압축 × 재생속도 = 설정 배속" 계약이 깨져
+ *  **설정보다 빠르게** 재생된다(교차검증 codex 2026-07-29). 압축 단계에서 이 예산을 넘으면
+ *  압축을 포기하는 쪽이 맞다 — 실측 압축비는 f≈1.1~1.3 이라 평소엔 닿지 않는다. */
+export function trimFactorBudget(rate?: number): number {
+  const r = Number.isFinite(rate as number) ? (rate as number) : 1;
+  if (r <= 1) return 1;
+  return Math.max(1, r / (sherpaModelSpeed(r) * PLAYBACK_MIN));
+}
+
 // 재생속도가 분담할 배수(전체 ÷ 모델 몫 ÷ 무음압축 몫). trimFactor = 압축으로 이미 번
 // 배속(원본길이÷압축길이, 미압축=1). 곱 불변식: 모델 × trimFactor × 재생속도 = 설정 배속.
 export function sherpaPlaybackRate(rate?: number, trimFactor: number = 1): number {
@@ -157,5 +173,5 @@ export function sherpaPlaybackRate(rate?: number, trimFactor: number = 1): numbe
   const f = Number.isFinite(trimFactor) && trimFactor >= 1 ? trimFactor : 1;
   // 하한 0.5: 쉼이 극단적으로 많은 문장에서 압축만으로 목표 배속을 넘어선 경우 되레 늦춰
   // 설정 배속을 정확히 지킨다(현실적으론 f<3 이라 거의 항상 >1).
-  return Math.max(0.5, Math.min(PLAYBACK_HARD_MAX, r / (sherpaModelSpeed(r) * f)));
+  return Math.max(PLAYBACK_MIN, Math.min(PLAYBACK_HARD_MAX, r / (sherpaModelSpeed(r) * f)));
 }
