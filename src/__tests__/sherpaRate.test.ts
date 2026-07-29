@@ -46,11 +46,12 @@ describe('sherpa 배속(상한 없음 — 스트레치 3× 우선, 초과분 모
 describe('스마트 스피드(무음 압축) 연동', () => {
   // ⚠️ 무음 압축 임계(3.0)는 스트레치 경계(2.1)와 **별개 상수**다(v1.28.0에서 분리). 예전엔
   // 같은 상수를 공유해서, 스트레치 경계를 내리면 낭독 리듬(쉼 압축)까지 함께 바뀌었다.
-  // v1.29.0: 3.0 자신을 포함한다(사용자 보고 "3배속은 씹히기도 한다" + 짝비교 실측
-  // 3.0× CER 0.361 → 0.254). 2.5× 이하는 압축 이득이 실측 0 이라 제외 유지.
-  test('적용 정책 — 3× 이상만(2.5× 이하는 이득 0 으로 실측)', () => {
-    for (const r of [0.5, 1, 2, 2.5, 2.9]) expect(sherpaTrimEnabled(r)).toBe(false);
-    for (const r of [3, 3.01, 4, 5, 10]) expect(sherpaTrimEnabled(r)).toBe(true);
+  // ⚠️ 3.0× 는 제외한다. v1.29.0에서 포함시켰다가 되돌렸다 — CER 은 좋아지지만(0.361→0.254)
+  // 문장 끝 여운이 190ms→42ms 로 깎여 "끝이 잘린다"는 청감 판정을 받았다(rate.ts 주석).
+  // 이 경계를 다시 내리려면 **긴 쉼을 건드리지 않는 선택적 압축**이 먼저다.
+  test('적용 정책 — 3× 초과만(3.0× 포함은 말끝 여운을 깎아 기각)', () => {
+    for (const r of [0.5, 1, 2, 2.5, 2.9, 3]) expect(sherpaTrimEnabled(r)).toBe(false);
+    for (const r of [3.01, 4, 5, 10]) expect(sherpaTrimEnabled(r)).toBe(true);
     expect(sherpaTrimEnabled(undefined)).toBe(false);
   });
 
@@ -214,20 +215,3 @@ describe('무음 압축 예산(곱 불변식 보호)', () => {
   });
 });
 
-// v1.29.0: 무음 압축을 3.0× 에 켜면서, 완급(paceComp) 게이트까지 함께 옮기지 않았다.
-// 게이트를 공유했다면 3.0× 에서 짧은 문장 템포 보정이 조용히 꺼져 "측정하지 않은 변화"가
-// 딸려 들어왔을 것이다 — 이번에 바뀐 것은 압축 하나뿐이어야 한다.
-describe('압축 게이트와 완급 게이트의 분리(v1.29.0)', () => {
-  const { sherpaPaceComp, sherpaTrimEnabled } = require('../tts/sherpa/rate');
-
-  test('3.0×: 압축은 켜지되 완급은 2.5× 와 동일하게 살아 있다', () => {
-    expect(sherpaTrimEnabled(3)).toBe(true);
-    expect(sherpaPaceComp(0.88, 1, { rate: 3, rubatoOn: true })).toBeCloseTo(0.88, 6);
-    expect(sherpaPaceComp(0.88, 1, { rate: 2.5, rubatoOn: true })).toBeCloseTo(0.88, 6);
-  });
-
-  test('3.0× 초과는 종전대로 완급 없음(훑어 듣기)', () => {
-    expect(sherpaPaceComp(0.88, 0.9, { rate: 3.01, rubatoOn: true })).toBe(1);
-    expect(sherpaPaceComp(0.88, 0.9, { rate: 5, rubatoOn: true })).toBe(1);
-  });
-});
