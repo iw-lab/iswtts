@@ -473,15 +473,20 @@ function SleepSheet({
         selected={sleepLeft === null && !endOfPara}
         onPress={() => pick(null)}
       />
-      {SLEEP_PRESETS.map((m) => (
-        <SheetRow
-          key={m}
-          icon="clock"
-          label={`${m}분 뒤`}
-          hint={m === lastMinutes ? '지난번에 고른 시간' : undefined}
-          onPress={() => pick({ minutes: m })}
-        />
-      ))}
+      {/* 켜진 분 타이머 = 마지막으로 고른 프리셋(setSleep 이 고를 때마다 sleepMinutes 에 적는다). */}
+      {SLEEP_PRESETS.map((m) => {
+        const on = sleepLeft !== null && m === lastMinutes;
+        return (
+          <SheetRow
+            key={m}
+            icon="clock"
+            label={`${m}분 뒤`}
+            selected={on}
+            hint={on ? `${sleepLeft}분 남음` : m === lastMinutes ? '지난번에 고른 시간' : undefined}
+            onPress={() => pick({ minutes: m })}
+          />
+        );
+      })}
       <SheetRow
         icon="book"
         label="이 문단이 끝나면"

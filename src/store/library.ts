@@ -37,6 +37,8 @@ export function countChars(sentences: string[]): number {
   return n;
 }
 
+let backfilling = false;
+
 function newId() {
   return `${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
 }
@@ -54,6 +56,8 @@ export type LibraryState = {
   setProgress: (id: string, lastIndex: number, total: number) => void;
   rename: (id: string, title: string) => void;
   remove: (id: string) => Promise<void>;
+  /** 글자 수가 없는 구문서(v1.31 이전)를 한 번 센다 — 남은 시간 표시용. 실패한 책은 첫 열기에 채운다. */
+  backfillCharCounts: () => Promise<void>;
 };
 
 export const useLibrary = create<LibraryState>()(
@@ -160,6 +164,30 @@ export const useLibrary = create<LibraryState>()(
               : d,
           ),
         });
+      },
+
+      backfillCharCounts: async () => {
+        // 한 번에 하나만(서재 화면이 다시 마운트돼도 겹쳐 돌지 않게 — 교차검증 codex).
+        if (backfilling) return;
+        backfilling = true;
+        try {
+          const counts = new Map<string, number>();
+          for (const d of get().docs.filter((x) => !x.charCount)) {
+            try {
+              const raw = await readAsStringAsync(`${DOCS_DIR}${d.id}.json`);
+              const n = countChars((JSON.parse(raw) as { sentences?: string[] }).sentences || []);
+              if (n > 0) counts.set(d.id, n);
+            } catch {
+              /* 파일이 없거나 깨졌다 — 첫 열기(loadDoc)가 다시 센다 */
+            }
+          }
+          // 모아서 한 번에(책마다 갱신하면 서재 정렬·구독 화면이 N번 다시 그려진다). 그 사이 연 책은
+          // loadDoc 이 이미 셌으니 건드리지 않는다.
+          if (counts.size)
+            set({ docs: get().docs.map((x) => (!x.charCount && counts.has(x.id) ? { ...x, charCount: counts.get(x.id) } : x)) });
+        } finally {
+          backfilling = false;
+        }
       },
 
       rename: (id, title) => {

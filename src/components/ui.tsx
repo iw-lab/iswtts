@@ -1,10 +1,11 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   Switch,
   Modal,
+  Keyboard,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -221,6 +222,30 @@ export function PrimaryButton({
   );
 }
 
+/** 키보드 높이(dp, 내비게이션 바 위로 올라온 만큼). 시트가 떠 있는 동안만 듣는다.
+ *  ⚠️ 안드로이드 모달 창은 edge-to-edge 강제(SDK 57·targetSdk 36)라 키보드가 떠도 창이 줄지 않는다
+ *  (adjustResize 무효) — 시트 아래쪽 「서재에 추가하고 듣기」·이름 바꾸기 칸이 키보드에 통째로
+ *  덮였다(에뮬 실측 2026-10-14, 교차검증 grok 지적 확인). 그래서 시트가 직접 그만큼 올라선다. */
+function useKeyboardHeight(active: boolean): number {
+  const [h, setH] = useState(0);
+  useEffect(() => {
+    if (!active) {
+      setH(0);
+      return;
+    }
+    const show = Keyboard.addListener('keyboardDidShow', (e) => setH(Math.max(0, e.endCoordinates.height)));
+    const hide = Keyboard.addListener('keyboardDidHide', () => setH(0));
+    // 시트를 바꿔 열 때 키보드가 이미 떠 있으면 그 높이로 시작한다.
+    const m = Keyboard.isVisible() ? Keyboard.metrics() : undefined;
+    if (m) setH(Math.max(0, m.height));
+    return () => {
+      show.remove();
+      hide.remove();
+    };
+  }, [active]);
+  return h;
+}
+
 /** 바텀 시트(모달). 바깥 탭·뒤로 가기로 닫힌다. */
 export function Sheet({
   visible,
@@ -237,6 +262,9 @@ export function Sheet({
 }) {
   const p = usePalette();
   const insets = useSafeAreaInsets();
+  const kb = useKeyboardHeight(visible);
+  // 키보드가 떠 있으면 키보드(+그 아래 내비게이션 바) 위로 올라선다.
+  const padBottom = kb > 0 ? kb + insets.bottom + 12 : insets.bottom + 16;
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
       <View style={styles.sheetWrap}>
@@ -251,7 +279,7 @@ export function Sheet({
             styles.sheet,
             {
               backgroundColor: p.elevated,
-              paddingBottom: insets.bottom + 16,
+              paddingBottom: padBottom,
               maxHeight: tall ? '88%' : '75%',
               height: tall ? '88%' : undefined,
             },

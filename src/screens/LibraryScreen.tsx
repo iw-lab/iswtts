@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   View,
   Text,
@@ -8,8 +8,6 @@ import {
   ActivityIndicator,
   Alert,
   TextInput,
-  KeyboardAvoidingView,
-  Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { NativeStackScreenProps } from '@react-navigation/native-stack';
@@ -18,6 +16,7 @@ import { useLibrary } from '../store/library';
 import { useSettings } from '../store/settings';
 import { importDocument } from '../extract';
 import { remainingSec, formatDuration } from '../lib/listenTime';
+import { sortRecent, pickResume } from '../lib/libraryView';
 import Icon from '../components/Icon';
 import { IconButton, PrimaryButton, Sheet, SheetRow } from '../components/ui';
 import type { RootStackParamList } from '../../App';
@@ -51,13 +50,16 @@ export default function LibraryScreen({ navigation }: Props) {
   const [pasteText, setPasteText] = useState('');
   const [newTitle, setNewTitle] = useState('');
 
-  // 최근에 들은 순(구문서는 추가 시각).
-  const sorted = useMemo(
-    () => [...docs].sort((a, b) => (b.lastOpenedAt ?? b.createdAt) - (a.lastOpenedAt ?? a.createdAt)),
-    [docs],
-  );
-  // 이어 듣기 = 가장 최근에 열었고 아직 다 안 들은 책.
-  const resume = sorted.find((d) => d.lastOpenedAt && d.progress > 0 && d.progress < 1);
+  const sorted = useMemo(() => sortRecent(docs), [docs]);
+  const resume = pickResume(sorted);
+
+  // 구문서(v1.31 이전) 글자 수를 한 번 채운다 — 없으면 남은 시간이 책을 다시 열 때까지 안 뜬다.
+  // 복원(hydration) 전에 돌면 빈 목록이라 아무 일도 안 하므로 복원이 끝난 뒤에 돈다.
+  useEffect(() => {
+    const run = () => void useLibrary.getState().backfillCharCounts();
+    if (useLibrary.persist.hasHydrated()) run();
+    return useLibrary.persist.onFinishHydration(run);
+  }, []);
 
   const open = (doc: Doc, autoplay = false) => navigation.navigate('Player', { docId: doc.id, autoplay });
 
@@ -250,7 +252,8 @@ export default function LibraryScreen({ navigation }: Props) {
 
       {/* 붙여넣기 */}
       <Sheet visible={sheet === 'paste'} onClose={() => setSheet(null)} title="글 붙여넣기" tall>
-        <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={{ flex: 1, gap: 10 }}>
+        {/* 키보드 위로 올라서는 건 Sheet 가 맡는다(ui.tsx useKeyboardHeight). */}
+        <View style={{ flex: 1, gap: 10 }}>
           <TextInput
             value={pasteTitle}
             onChangeText={setPasteTitle}
@@ -275,7 +278,7 @@ export default function LibraryScreen({ navigation }: Props) {
           />
           <Text style={{ color: p.subtext, fontSize: 12.5 }}>{pasteText.length.toLocaleString()}자</Text>
           <PrimaryButton label="서재에 추가하고 듣기" icon="check" onPress={onPasteAdd} disabled={busy || !pasteText.trim()} />
-        </KeyboardAvoidingView>
+        </View>
       </Sheet>
 
       {/* 책 메뉴 */}
