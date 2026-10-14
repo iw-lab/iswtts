@@ -23,6 +23,12 @@ describe('목차', () => {
     expect(currentTocPos(toc, 0)).toBe(0);
     expect(currentTocPos([], 3)).toBe(-1);
   });
+  test('장면 구분선(* * · --- · ***)은 목차가 아니다', () => {
+    // 에뮬 실측(2026-10-14): 마크다운 책의 목차 23개 중 21개가 「* *」, 장 표시도 「* *」였다.
+    const md = ['제1권 제4장 — 장각, 별이 지다', '---', '중평 원년이었다.', '* *', '그는 웃었다.', '***', '* * *', '삼월 하순'];
+    const toc = buildToc(md, new Set(md.map((_, i) => i)));
+    expect(toc.map((e) => e.title)).toEqual(['제1권 제4장 — 장각, 별이 지다', '삼월 하순']);
+  });
   test('짧은 줄 위주 문서(시)는 강한 표지만', () => {
     const poem = Array.from({ length: 80 }, (_, i) => (i === 40 ? '제2부' : `짧은 시구 ${i}`));
     const toc = buildToc(poem, new Set(poem.map((_, i) => i)));

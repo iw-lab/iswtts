@@ -7,6 +7,10 @@ const HEADING_RE =
   /^(?:제\s*[0-9０-９一二三四五六七八九十百]+\s*[권장화부편절회막]|[0-9]{1,3}\s*[장화편회부](?:\s|$|[.:·—-])|(?:chapter|part|book)\s*[0-9ivx]+|(?:프롤로그|에필로그|서장|종장|서문|머리말|맺음말|작가의\s*말|후기|序章|終章))/i;
 // 문장 끝 표지가 없는 짧은 문단 첫 줄 = 소제목일 가능성(마크다운에서 # 를 벗긴 제목 등).
 const SENTENCE_END_RE = /[.!?。…"'”’」』)\]]\s*$/;
+// 글자·숫자가 하나도 없는 줄은 제목이 아니다 — 장면 구분선(「* * *」·「---」, 마크다운 정리 뒤 「* *」).
+// 에뮬 실측(2026-10-14): 이 검사가 없어 한 책의 목차 23개 중 21개가 「* *」였고 플레이어 장 표시도
+// 「* *」였다. 엔진의 무음 판정(SherpaTtsEngine SPOKEN_HAS_WORD)과 같은 기준.
+const HAS_WORD = /[\p{L}\p{N}]/u;
 const MAX_TITLE = 40;
 const MAX_ENTRIES = 600;
 
@@ -16,7 +20,7 @@ export function buildToc(sentences: string[], paraStarts: Set<number>): TocEntry
   const out: TocEntry[] = [];
   for (let i = 0; i < sentences.length; i++) {
     const t = sentences[i].trim();
-    if (!t || t.length > MAX_TITLE) continue;
+    if (!t || t.length > MAX_TITLE || !HAS_WORD.test(t)) continue;
     const strong = HEADING_RE.test(t);
     const weak = paraStarts.has(i) && t.length <= 24 && !SENTENCE_END_RE.test(t) && !/^["“「『'‘]/.test(t);
     if (strong || weak) out.push({ index: i, title: t });

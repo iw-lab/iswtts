@@ -7,6 +7,7 @@ import {
   _failAllPdfRequests,
   type PdfRequest,
 } from '../extract/pdfBridge';
+import { PDF_JOIN_SRC } from '../lib/pdfJoin';
 
 // pdf.js를 로드한 숨겨진 WebView. base64 PDF를 받아 페이지별 텍스트를 추출해 돌려준다.
 // v1.3: CDN 2원화(cdnjs → jsdelivr 폴백) + 전부 실패 시 fatal 통지(브릿지 타임아웃과 이중 안전망).
@@ -38,6 +39,7 @@ const HTML = `<!doctype html><html><head><meta charset="utf-8"/>
     }
     post({ fatal: 'pdf.js 로드 실패 — 인터넷 연결을 확인해주세요.' });
   })();
+  ${PDF_JOIN_SRC}
   function b64ToBytes(b64){
     const bin = atob(b64); const len = bin.length; const bytes = new Uint8Array(len);
     for (let i=0;i<len;i++) bytes[i]=bin.charCodeAt(i);
@@ -52,14 +54,8 @@ const HTML = `<!doctype html><html><head><meta charset="utf-8"/>
       for (let p=1; p<=pdf.numPages; p++){
         const page = await pdf.getPage(p);
         const tc = await page.getTextContent();
-        let last = null, line = '';
-        for (const it of tc.items){
-          const s = it.str || '';
-          if (last !== null && Math.abs((it.transform[5]||0) - last) > 2){ out.push(line); line=''; }
-          line += s + (it.hasEOL ? '\\n' : ' ');
-          last = it.transform ? it.transform[5] : last;
-        }
-        if (line) out.push(line);
+        const pageText = joinPdfItems(tc.items);
+        if (pageText) out.push(pageText);
         out.push('');
       }
       post({ id, ok:true, text: out.join('\\n') });
