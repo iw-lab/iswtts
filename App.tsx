@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react';
 import { StatusBar } from 'expo-status-bar';
-import { useColorScheme, Alert } from 'react-native';
+import { Alert } from 'react-native';
+import * as SystemUI from 'expo-system-ui';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { NavigationContainer, DefaultTheme, DarkTheme } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -15,20 +16,33 @@ import { configureAudioSession } from './src/lib/mediaSession';
 import { installCrashLogger, readLastCrash, clearLastCrash } from './src/lib/crashLog';
 import { APP_VERSION } from './src/lib/config';
 import { initVisibility } from './src/lib/visibility';
+import { usePalette } from './src/lib/theme';
 
 // JS 치명 오류를 기기 파일로 남기는 로컬 크래시 로거(외부 전송 없음). 최대한 이른 시점에 설치.
 installCrashLogger(APP_VERSION);
 
 export type RootStackParamList = {
   Library: undefined;
-  Player: { docId: string };
+  Player: { docId: string; autoplay?: boolean };
   Settings: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 
 export default function App() {
-  const scheme = useColorScheme();
+  // 읽기 테마(v1.32.0 — 설정 > 화면). 내비게이션 바탕·상태바·루트 창 배경을 같은 팔레트로.
+  const p = usePalette();
+  const navTheme = React.useMemo(() => {
+    const base = p.dark ? DarkTheme : DefaultTheme;
+    return {
+      ...base,
+      colors: { ...base.colors, background: p.bg, card: p.surface, text: p.text, border: p.border, primary: p.primary },
+    };
+  }, [p]);
+  useEffect(() => {
+    // 화면 전환·키보드 뒤로 비치는 루트 창 색 — 검정 테마에서 흰 번쩍임 방지.
+    SystemUI.setBackgroundColorAsync(p.bg).catch(() => { /* 미지원 기기 무시 */ });
+  }, [p.bg]);
 
   // 앱 실행 시: 캐시 잔존물 청소(중단된 합성 mp3·설치 끝난 APK) 후 최신 릴리스 확인.
   // 직전 실행이 크래시로 끝났으면 저장된 로그를 1회 안내(확인 시 삭제).
@@ -58,7 +72,7 @@ export default function App() {
 
   return (
     <SafeAreaProvider>
-      <NavigationContainer theme={scheme === 'dark' ? DarkTheme : DefaultTheme}>
+      <NavigationContainer theme={navTheme}>
         <Stack.Navigator screenOptions={{ headerShown: false }}>
           <Stack.Screen name="Library" component={LibraryScreen} />
           <Stack.Screen name="Player" component={PlayerScreen} />
@@ -71,7 +85,7 @@ export default function App() {
       </NavigationContainer>
       {/* PDF 텍스트 추출용 숨겨진 WebView(pdf.js) — 앱 전역에서 1회 마운트 */}
       <PdfExtractor />
-      <StatusBar style="auto" />
+      <StatusBar style={p.dark ? 'light' : 'dark'} />
     </SafeAreaProvider>
   );
 }

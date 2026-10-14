@@ -44,7 +44,8 @@ async function startUpdate(apkUrl: string, version: string): Promise<void> {
   }
 }
 
-export async function checkForUpdate(): Promise<void> {
+// manual = 설정 화면의 「업데이트 확인」(v1.32.0) — 결과를 항상 알려 준다. 자동(기동 시)은 조용히.
+export async function checkForUpdate(manual = false): Promise<void> {
   if (Platform.OS !== 'android') return;
   try {
     const controller = new AbortController();
@@ -54,11 +55,17 @@ export async function checkForUpdate(): Promise<void> {
       signal: controller.signal,
     });
     clearTimeout(timeoutId);
-    if (!res.ok) return;
+    if (!res.ok) {
+      if (manual) Alert.alert('업데이트 확인', '지금은 확인할 수 없어요. 잠시 뒤 다시 시도해 주세요.');
+      return;
+    }
 
     const release = await res.json();
     const latest = (release.tag_name || '').replace(/^v/, '');
-    if (!latest || compareVersions(APP_VERSION, latest) <= 0) return;
+    if (!latest || compareVersions(APP_VERSION, latest) <= 0) {
+      if (manual) Alert.alert('업데이트 확인', `최신 버전(v${APP_VERSION})을 쓰고 있어요.`);
+      return;
+    }
 
     // 고정명 애셋만 신뢰. ("아무 .apk나" 폴백은 릴리스에 다른 apk가 섞였을 때
     // 엉뚱한 파일이 설치 후보가 되는 경로라 제거 — 릴리스 스크립트가 고정명을 보장한다.)
@@ -77,6 +84,7 @@ export async function checkForUpdate(): Promise<void> {
       ],
     );
   } catch {
-    // 업데이트 체크 실패는 조용히 무시
+    // 자동 체크 실패는 조용히 무시
+    if (manual) Alert.alert('업데이트 확인', '인터넷 연결을 확인한 뒤 다시 시도해 주세요.');
   }
 }

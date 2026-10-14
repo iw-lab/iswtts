@@ -29,3 +29,31 @@ index c76a9fd..5b84cf1 100644
      val pitch = if (preservesPitch) 1f else playbackRate
      ref.playbackParameters = PlaybackParameters(playbackRate, pitch)
    }
+diff --git a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/BaseAudioPlayer.kt b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/BaseAudioPlayer.kt
+index 149e907..2adae5e 100644
+--- a/node_modules/expo-audio/android/src/main/java/expo/modules/audio/BaseAudioPlayer.kt
++++ b/node_modules/expo-audio/android/src/main/java/expo/modules/audio/BaseAudioPlayer.kt
+@@ -52,7 +52,13 @@ abstract class BaseAudioPlayer(
+   protected fun startUpdating() {
+     updateJob?.cancel()
+     updateJob = flow {
+-      while (true) {
++      // PATCH(iwtts): 재생 중일 때만 주기 루프를 돈다. 원본은 while(true) 라 재생하지 않는
++      // 플레이어(미리 만들어 둔 다음 문장·일시정지된 앵커)도 updateInterval 마다 메인 스레드를
++      // 깨웠다(보낼 것이 없어도 깨어나서 검사만 하고 다시 잔다). 낭독 앱은 플레이어를 여러 개
++      // 미리 쥐고 있어 화면이 꺼진 몇 시간 동안 이 헛깨움이 쌓인다(배터리 — v1.32.0).
++      // 멈추면 루프가 스스로 끝나고, onIsPlayingChanged(true) 가 다시 시작한다.
++      // 완료(didJustFinish)·오류·로딩은 아래 리스너가 주기와 무관하게 즉시 보내므로 영향 없다.
++      while (playing) {
+         emit(Unit)
+         delay(updateInterval.toLong())
+       }
+@@ -78,6 +84,8 @@ abstract class BaseAudioPlayer(
+     val listener = object : Player.Listener {
+       override fun onIsPlayingChanged(isPlaying: Boolean) {
+         playing = isPlaying
++        // PATCH(iwtts): 재생이 시작되면 주기 루프를 (다시) 켠다 — startUpdating 주석 참조.
++        if (isPlaying && updateJob?.isActive != true) startUpdating()
+         onPlaybackStateChange?.invoke(isPlaying)
+ 
+         val isTransient = !isPlaying &&

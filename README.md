@@ -29,7 +29,7 @@ cd android && ./gradlew assembleRelease  # → app/build/outputs/apk/release/app
 scripts/release.sh --push
 ```
 → `SoriBook-latest.apk`(고정명) + 버전명 APK를 GitHub 릴리스에 첨부.
-고정 최신 URL: `https://github.com/insushim/iswtts/releases/latest/download/SoriBook-latest.apk`
+고정 최신 URL: `https://github.com/iw-lab/iswtts/releases/latest/download/SoriBook-latest.apk`
 
 ## 로드맵
 - v1.1: 스캔 PDF OCR(ML Kit), DOCX, 오프라인 번들 pdf.js, 백그라운드 재생(포그라운드 서비스)

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { View } from 'react-native';
 import { WebView } from 'react-native-webview';
 import {
@@ -12,6 +12,12 @@ import {
 // v1.3: CDN 2원화(cdnjs → jsdelivr 폴백) + 전부 실패 시 fatal 통지(브릿지 타임아웃과 이중 안전망).
 // 완전 오프라인(pdf.js 앱 내 번들)은 후속 — 임포트 시에는 인터넷 필요.
 const PDFJS_VERSION = '4.6.82';
+// v1.32.0: WebView 는 PDF 를 가져올 때만 띄운다. 예전엔 앱 시작부터 끝까지 숨은 WebView(크로뮴
+// 렌더러 프로세스 + pdf.js CDN 로드)가 상주했다 — 대부분의 실행에서 PDF 를 한 번도 안 여는데도
+// 메모리와 네트워크·CPU 를 썼다(배터리 점검 2026-10-14 — 에뮬 logcat: 앱 기동 즉시
+// webview:sandboxed_process 기동). 할 일이 다 끝나면 **바로** 내린다 — 타이머로 미루면 화면이
+// 꺼진 동안 그 타이머가 얼어 WebView 가 남는다(교차검증 grok 지적). 가져오기는 한 번에 한 파일이라
+// 다음 PDF 에서 pdf.js 를 다시 받는 몇 초가 유일한 대가다.
 
 const HTML = `<!doctype html><html><head><meta charset="utf-8"/>
 <script type="module">
@@ -67,20 +73,40 @@ export default function PdfExtractor() {
   const ready = useRef(false);
   const failed = useRef<string | null>(null); // pdf.js 로드 영구 실패 사유(전 CDN 실패)
   const queue = useRef<PdfRequest[]>([]);
+  const [mounted, setMounted] = useState(false);
+
+  // 할 일이 다 끝났으면 WebView 를 내린다(위 주석). 이름은 호출부 호환을 위해 유지.
+  const scheduleIdleUnmount = () => {
+    if (pending.current.size || queue.current.length) return;
+    ready.current = false;
+    failed.current = null; // 오프라인이라 실패했어도 다음 가져오기에서 다시 시도
+    setMounted(false);
+  };
 
   useEffect(() => {
     const send = (req: PdfRequest) => {
       if (failed.current) {
         req.reject(new Error(failed.current));
+        scheduleIdleUnmount();
         return;
       }
       pending.current.set(req.id, req);
       if (ready.current) fire(req);
-      else queue.current.push(req);
+      else {
+        queue.current.push(req);
+        setMounted(true); // 첫 요청에서 WebView 를 띄운다 — ready 가 오면 큐를 비운다
+      }
     };
     // 두 번째 인자 = 브릿지 타임아웃 시 pending 맵 정리 훅(누수 방지).
-    _registerPdfPump(send, (id) => pending.current.delete(id));
+    _registerPdfPump(send, (id) => {
+      pending.current.delete(id);
+      // ready 를 못 받은 채 시간이 다 된 요청은 대기열에도 남아 있다 — 같이 지워야 WebView 가
+      // 내려간다(안 지우면 PDF base64 와 WebView 가 계속 붙잡힌다 — 교차검증 codex).
+      queue.current = queue.current.filter((r) => r.id !== id);
+      scheduleIdleUnmount();
+    });
     return () => _unregisterPdfPump();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const fire = (req: PdfRequest) => {
@@ -112,6 +138,7 @@ export default function PdfExtractor() {
       pending.current.forEach((r) => r.reject(err));
       pending.current.clear();
       _failAllPdfRequests(err);
+      scheduleIdleUnmount();
       return;
     }
     const req = pending.current.get(msg.id);
@@ -119,7 +146,10 @@ export default function PdfExtractor() {
     pending.current.delete(msg.id);
     if (msg.ok) req.resolve(msg.text || '');
     else req.reject(new Error(msg.error || 'PDF 추출 실패'));
+    if (!pending.current.size && !queue.current.length) scheduleIdleUnmount();
   };
+
+  if (!mounted) return null;
 
   return (
     <View style={{ width: 0, height: 0, position: 'absolute', opacity: 0 }} pointerEvents="none">

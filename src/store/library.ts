@@ -13,17 +13,28 @@ import {
 import type { Doc, DocFormat } from '../types';
 import { segmentDocument } from '../lib/segment';
 import { buildRepairIndex, repairFakeSpaces } from '../lib/dewrap';
+import { stripMarkdownLine } from '../lib/markdown';
 
 const DOCS_DIR = `${documentDirectory}docs/`;
 
 // 저장 문서 스키마 버전. 2 = 고정폭 하드랩의 "가짜 공백"이 정리된 문장(v1.27.3).
 // 그 이전(버전 없음)에 추가된 책은 loadDoc 이 1회 복원하고 이 표식을 남긴다 — 복원은
 // **문장 수·순서를 바꾸지 않으므로**(공백만 제거) 읽던 위치(lastIndex)가 그대로 보존된다.
-const DOC_SCHEMA = 2;
+// 3 = 마크다운 문서의 기호(# 제목·> 인용·**강조**) 정리(v1.32.0). 2 이하의 .md 문서는
+// loadDoc 이 문장마다 1회 벗긴다 — 문장 수·순서는 그대로(빈 문장이 되면 원문 유지)라
+// 읽던 위치가 보존된다.
+const DOC_SCHEMA = 3;
 
 async function ensureDir() {
   const info = await getInfoAsync(DOCS_DIR);
   if (!info.exists) await makeDirectoryAsync(DOCS_DIR, { intermediates: true });
+}
+
+/** 공백 제외 글자 수 — 남은 시간 추정의 단위(lib/listenTime.ts). */
+export function countChars(sentences: string[]): number {
+  let n = 0;
+  for (const t of sentences) n += t.replace(/\s/g, '').length;
+  return n;
 }
 
 function newId() {
@@ -41,6 +52,7 @@ export type LibraryState = {
   // 문단 호흡만 빠지고 나머지 페이스 변주는 그대로 동작한다.
   loadDoc: (id: string) => Promise<{ sentences: string[]; paraStarts: number[] }>;
   setProgress: (id: string, lastIndex: number, total: number) => void;
+  rename: (id: string, title: string) => void;
   remove: (id: string) => Promise<void>;
 };
 
@@ -66,6 +78,8 @@ export const useLibrary = create<LibraryState>()(
           sentenceCount: sentences.length,
           progress: 0,
           lastIndex: 0,
+          lastOpenedAt: Date.now(),
+          charCount: countChars(sentences),
         };
         set({ docs: [doc, ...get().docs] });
         return doc;
@@ -80,15 +94,37 @@ export const useLibrary = create<LibraryState>()(
         };
         const sentences = parsed.sentences || [];
         const paraStarts = parsed.paraStarts || [];
+        // 연 시각·글자 수 기록(구문서는 글자 수가 없다 — 첫 열기에 채운다). 아래 1회 복원이
+        // 문장을 바꾸면 그 결과로 다시 센다(markOpened 를 반환 직전에 부르는 이유).
+        const markOpened = (final: string[]) =>
+          set({
+            docs: get().docs.map((d) =>
+              d.id === id
+                ? { ...d, lastOpenedAt: Date.now(), charCount: d.charCount && final === sentences ? d.charCount : countChars(final) }
+                : d,
+            ),
+          });
         if (parsed.v === DOC_SCHEMA || sentences.length === 0) {
+          markOpened(sentences);
           return { sentences, paraStarts };
         }
+        const isMd = get().docs.find((d) => d.id === id)?.format === 'md';
         // 구버전 문서 1회 복원(DOC_SCHEMA 주석): 문서 전체 빈도로 "단어 중간 가짜 공백"만
         // 지운다. 실측(초한지 코퍼스): 가짜 공백의 72%를 정밀도 96.7%로 제거, 애초에 가짜
         // 공백이 없는 정상 문서에서는 전체 공백의 0.09%만 건드린다(대부분 "한 번"→"한번"
         // 류의 무해한 붙여쓰기). 실패해도 원본을 그대로 쓴다 — 낭독을 막지 않는 것이 우선.
-        const idx = buildRepairIndex(sentences);
-        const repaired = sentences.map((s) => repairFakeSpaces(s, idx));
+        // v2 문서는 가짜 공백 복원이 이미 끝났다 — 다시 돌리지 않는다(멱등이긴 하지만 비용).
+        let repaired = sentences;
+        if ((parsed.v ?? 1) < 2) {
+          const idx = buildRepairIndex(sentences);
+          repaired = sentences.map((s) => repairFakeSpaces(s, idx));
+        }
+        if (isMd) {
+          repaired = repaired.map((s) => {
+            const t = stripMarkdownLine(s).trim();
+            return t || s;
+          });
+        }
         // 저장은 best-effort — 실패해도 이번 세션은 복원본으로 읽고 다음 열기에서 다시 시도한다.
         // 큰 문서(수 MB)를 제자리에 덮어쓰다 앱이 죽으면 책이 통째로 깨지므로 임시 파일에 쓰고
         // 교체한다. 교체 단계가 실패하면 원본이 이미 지워졌을 수 있으니 직접 쓰기로 복구한다.
@@ -107,6 +143,7 @@ export const useLibrary = create<LibraryState>()(
             /* 다음 열기에서 다시 시도 */
           }
         }
+        markOpened(repaired);
         return { sentences: repaired, paraStarts };
       },
 
@@ -118,10 +155,17 @@ export const useLibrary = create<LibraryState>()(
                   ...d,
                   lastIndex,
                   progress: total > 0 ? Math.min(1, (lastIndex + 1) / total) : 0,
+                  lastOpenedAt: Date.now(),
                 }
               : d,
           ),
         });
+      },
+
+      rename: (id, title) => {
+        const t = title.trim();
+        if (!t) return;
+        set({ docs: get().docs.map((d) => (d.id === id ? { ...d, title: t } : d)) });
       },
 
       remove: async (id) => {

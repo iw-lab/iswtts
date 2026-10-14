@@ -5,7 +5,7 @@
 # - 현재 코드 버전(src/lib/config.ts APP_VERSION)으로 release APK 빌드
 # - 버전명 애셋 + 고정명 애셋(SoriBook-latest.apk) 둘 다 첨부해 GitHub 릴리스 생성
 # - 그래야 고정 최신 URL이 유지됨:
-#     https://github.com/insushim/iswtts/releases/latest/download/SoriBook-latest.apk
+#     https://github.com/iw-lab/iswtts/releases/latest/download/SoriBook-latest.apk
 #   (최신 릴리스에 그 고정명 애셋이 없으면 이 URL이 404 → 이 스크립트가 누락 방지)
 #
 # 사용법:
@@ -18,7 +18,7 @@
 #   (config.ts APP_VERSION / app.json version+runtimeVersion / build.gradle versionName, versionCode+1).
 set -euo pipefail
 
-REPO="insushim/iswtts"
+REPO="iw-lab/iswtts"
 LATEST_ASSET="SoriBook-latest.apk"   # ← 고정 URL을 만드는 불변 파일명. 절대 바꾸지 말 것.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

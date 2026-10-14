@@ -30,7 +30,8 @@ import { normalizeForSpeech, SPOKEN_QUOTES } from './normalizeKo';
 import { chunkForSynthesis, hasClauseComma, chunkPauseJitterMs } from './chunkKo';
 import { makeBreathSamples, speechStats, breathDurMs } from './breathWav';
 import { estimateWordBoundaries, type WordBoundary } from './align';
-import { recordSynth, recordStarvation, recordPlaybackProgress } from './stats';
+import { recordSynth, recordStarvation, recordPlaybackProgress, recordLevel } from './stats';
+import { synthSeed, levelUtterance } from './voiceStable';
 import { subtitlesVisible, onVisibilityChange } from '../../lib/visibility';
 import { synthWaitIsNormal, SYNTH_GRACE_MS } from '../../lib/playbackWatchdog';
 
@@ -93,8 +94,14 @@ const MAX_CACHE = 36;
 // 미리 만들어 두는 AudioPlayer 수 상한. 파일 캐시(8)와 달리 플레이어는 네이티브 자원이라
 // 다음 발화 몫만 준비해 둔다(문장 시작 즉시 재생 효과는 1~2개로 이미 다 얻는다).
 const MAX_PRELOAD = 2;
-// 네이티브 상태 이벤트 주기(ms). PiP에선 JS 타이머가 얼어붙어 이 이벤트만이 자막을 움직인다.
-const STATUS_UPDATE_MS = 80;
+// 네이티브 상태 이벤트 주기(ms). v1.32.0: 80 → 250(배터리).
+// 80ms 는 PiP(작은 창) 시절 값이다 — PiP 에선 JS 타이머가 얼어 이 이벤트만이 자막을 움직였다.
+// PiP 는 v1.20.2 에 폐지됐고, 지금 화면이 켜져 있을 땐 엔진의 60ms JS 폴링이 하이라이트를
+// 몰며, 화면이 꺼지면 하이라이트를 아예 안 그린다. 이 이벤트가 꼭 해야 하는 일은 완료
+// (didJustFinish)·오류 통지인데, 그건 주기와 무관한 상태 변화 리스너로 즉시 온다
+// (expo-audio BaseAudioPlayer.onPlaybackStateChanged). 그런데 주기 루프는 이벤트마다
+// 네이티브→JS 브리지를 깨운다 — 화면이 꺼진 몇 시간 동안 초당 12.5회의 헛깨움이었다.
+const STATUS_UPDATE_MS = 250;
 // 합성 1건 상한(첫 호출의 모델 로드 포함). 네이티브 hang 시 직렬화 체인 전체가 영구
 // 대기하는 것을 막는다 — 초과 시 이 건만 실패시키고(폴백 유도) 체인은 계속 흐른다.
 const SYNTH_TIMEOUT_MS = 60_000;
@@ -539,6 +546,12 @@ export class SherpaTtsEngine implements TtsEngine {
       //   1스레드 0.192 / 2스레드 0.108 / 4스레드 0.113 / 6스레드 0.147
       // 2 를 넘기면 스레드 동기화 비용이 이득을 먹는다 — 늘려도 합성이 빨라지지 않으므로
       // "느리니 스레드를 더 주자"는 유혹을 여기서 차단한다(코어만 더 뺏겨 재생이 손해).
+      // ⚠️ 배터리를 아끼려고 합성 단계 수(num_steps, 기본 5)를 줄이지 말 것(v1.32.0 실측,
+      // 앱 HQ 팩 · 20문장 × 화자 0/6 · 같은 시드): 잡음 척도(말하는 구간 spectral flatness
+      // p95) 중앙값 5단계 0.0010 → 4단계 0.0055(5배) → 3단계 0.0111(11배), 6kHz 이상 고역비
+      // 0.31% → 0.82% → 1.66%. 4단계도 같은 문장 40개 중 32개가 더 시끄러웠다. 유튜브에서
+      // 잡음 2.5배 시도 하나가 1.5배속에서 「파열음」으로 들렸다 — 아낄 수 있는 연산은 ~10~25%
+      // 인데 대가가 귀에 들린다. 합성 CPU 는 낭독의 본질 비용으로 두고, 헛합성·화면·깨움을 줄인다.
       const n = await createTTS({
         modelPath: { type: 'file', path },
         modelType: 'supertonic',
@@ -636,7 +649,9 @@ export class SherpaTtsEngine implements TtsEngine {
     // 머리 패드도 파일에 구워진다 — 배속 비례 패드(v1.27.1, leadPadMsFor)라 짧은 문장은
     // 배속 구간별로 키가 갈린다(일반 문장은 상수 40 = 종전대로 배속 무관 단일 키).
     const lead = this.leadPadOf(text, params);
-    return `${sid}\u0000${sherpaModelSpeed(params.rate)}\u0000${langOf(params.language)}\u0000${breath}\u0000${lead}\u0000${text}`;
+    // 음성 안정화(v1.32.0, voiceStable.ts)는 시드·음량이 파일에 구워진다 — 토글하면 다시 합성.
+    const stable = params.stable ? 'v' : '';
+    return `${sid}\u0000${sherpaModelSpeed(params.rate)}\u0000${langOf(params.language)}\u0000${breath}\u0000${lead}\u0000${stable}\u0000${text}`;
   }
 
   // 이 발화의 머리 무음 패드(ms) — keyOf 와 doSynthesize 가 "반드시" 이 한 함수를 공유한다.
@@ -798,7 +813,9 @@ export class SherpaTtsEngine implements TtsEngine {
         // 톤이 흔들리는 "톤 깨짐"의 원인)에 따라 재생 스트레치(피치 보존)로 이동했다 —
         // paceComp/sherpaPaceComp. 완급 인자는 아래 반환 Synth 에 실어 재생부가 곱한다.
         speed: sherpaModelSpeed(params.rate),
-        extra: { lang },
+        // 음성 안정화: 입력(절 청크)·화자에 묶인 고정 시드 — 같은 문장은 다시 합성해도 같은
+        // 목소리(voiceStable.ts ①). 네이티브(sherpa 1.12.34)가 extra.seed 를 받는다.
+        extra: params.stable ? { lang, seed: String(synthSeed(input, params.voiceId || '0')) } : { lang },
         // 자막 결과는 버린다(sentence 단위 = 최소 비용) — fast 모드는 앞뒤 무음·쉼을 발화로
         // 깔고 계산한 글자수 비례 추정이라 하이라이트가 수백 ms 어긋났다(Whisper 대조 실측
         // 2026-07-07). 단어 타임스탬프는 아래 자체 정렬(align.ts)로 계산한다.
@@ -891,6 +908,10 @@ export class SherpaTtsEngine implements TtsEngine {
     // breathy: 숨소리가 심긴 발화는 들숨(저진폭)을 쉼으로 분류하는 높은 문턱을 쓴다(align.ts).
     const boundaries = estimateWordBoundaries(text, samples, sampleRate, { breathy: breathOn });
     if (state.cancelled) throw new Error('cancelled');
+    // 음성 안정화 ②: 문장 음량 고르기(voiceStable.ts). 정렬(위) **뒤에** 건다 — 이득은 길이를
+    // 안 바꾸지만 무음 판정 문턱이 절대값이라, 정렬을 고르기 전 파형으로 해야 하이라이트가
+    // 종전과 완전히 같다.
+    if (params.stable) recordLevel(levelUtterance(samples, sampleRate).gainDb);
 
     // 네이티브 WAV 저장은 file:// 없는 절대경로, expo-audio 재생은 file:// URI.
     const dir = (cacheDirectory || '').replace(/^file:\/\//, '');

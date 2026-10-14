@@ -56,9 +56,14 @@ const SYNTH_TIMEOUT_MS = 25000;
 // 아님) 깊게 미리 만들면 그만큼 동시 연결이 열려 서버 부하·연결 낭비가 된다. 병목도 CPU 가
 // 아니라 망 지연이라 얕은 버퍼로 충분하다.
 const MAX_CACHE = 4;
-// 네이티브 상태 이벤트 주기(ms). PiP(작은 창)에선 Android가 액티비티를 pause시켜 JS 타이머가
-// 얼어붙는다 — 이 이벤트는 액티비티 생명주기와 무관한 코루틴에서 계속 도착해 자막을 움직인다.
-const STATUS_UPDATE_MS = 80;
+// 네이티브 상태 이벤트 주기(ms). v1.32.0: 80 → 250(배터리).
+// 80ms 는 PiP(작은 창) 시절 값이다 — PiP 에선 JS 타이머가 얼어 이 이벤트만이 자막을 움직였다.
+// PiP 는 v1.20.2 에 폐지됐고, 지금 화면이 켜져 있을 땐 엔진의 60ms JS 폴링이 하이라이트를
+// 몰며, 화면이 꺼지면 하이라이트를 아예 안 그린다. 이 이벤트가 꼭 해야 하는 일은 완료
+// (didJustFinish)·오류 통지인데, 그건 주기와 무관한 상태 변화 리스너로 즉시 온다
+// (expo-audio BaseAudioPlayer.onPlaybackStateChanged). 그런데 주기 루프는 이벤트마다
+// 네이티브→JS 브리지를 깨운다 — 화면이 꺼진 몇 시간 동안 초당 12.5회의 헛깨움이었다.
+const STATUS_UPDATE_MS = 250;
 // 워치독 프로브 상수(근거는 SherpaTtsEngine 의 동명 상수 주석).
 const END_EPSILON_S = 0.25;
 const END_RATIO = 0.9;

@@ -25,6 +25,13 @@ export type SherpaStats = {
    *   starvedMs≈0 · stallMs 큼  → 재생 자체가 끊김(Sonic 스트레치·디코드 언더런, CPU 경합)
    */
   stallMs: number;
+  /** 음성 안정화(v1.32.0): 음량을 고른 문장 수와 평균 보정 폭(dB, 절댓값) */
+  leveled: number;
+  levelAbsDb: number;
+  /** 합성에 쓴 CPU 시간 누계(ms) — 배터리 진단(설정 화면) */
+  synthMs: number;
+  /** 합성된 오디오 누계(ms) */
+  audioMs: number;
 };
 
 const stats: SherpaStats = {
@@ -34,6 +41,10 @@ const stats: SherpaStats = {
   starvedMs: 0,
   lastStarvedAt: 0,
   stallMs: 0,
+  leveled: 0,
+  levelAbsDb: 0,
+  synthMs: 0,
+  audioMs: 0,
 };
 
 // 최근 성능에 반응하는 지수가중이동평균(EWMA). 단순 누적평균이면 표본이 쌓일수록 최근 건의
@@ -46,6 +57,15 @@ export function recordSynth(elapsedMs: number, audioMs: number): void {
   const rtf = elapsedMs / audioMs;
   stats.avgRtf = stats.synths === 0 ? rtf : stats.avgRtf + RTF_ALPHA * (rtf - stats.avgRtf);
   stats.synths += 1;
+  stats.synthMs += elapsedMs;
+  stats.audioMs += audioMs;
+}
+
+/** 음성 안정화 음량 보정 1건(gainDb = 0 이면 손대지 않은 문장 — 평균 폭에는 포함). */
+export function recordLevel(gainDb: number): void {
+  if (!Number.isFinite(gainDb)) return;
+  stats.leveled += 1;
+  stats.levelAbsDb += (Math.abs(gainDb) - stats.levelAbsDb) / stats.leveled;
 }
 
 // 발화 시작을 기다린 시간. 짧은 대기(프레임 몇 개)는 리듬에 안 잡히므로 무시한다.
@@ -61,7 +81,7 @@ export function recordStarvation(waitMs: number, now: number): void {
 // 재생 진행 감시: 두 상태 이벤트 사이에 오디오 위치가 "벽시계 × 배속"만큼 전진했는가.
 // 못 전진한 몫이 곧 사용자가 듣는 끊김/씹힘이다.
 //
-// 임계 0.7: 이벤트 타이밍 지터(updateInterval 80ms)와 앱 백그라운드 전환으로 벽시계만
+// 임계 0.7: 이벤트 타이밍 지터(updateInterval 250ms)와 앱 백그라운드 전환으로 벽시계만
 // 흐르는 구간이 있어 완만하게 잡는다. 벽시계 델타가 비정상적으로 큰 구간(백그라운드 복귀,
 // 화면 꺼짐)은 아예 버린다 — 그건 재생 결함이 아니다.
 const PROGRESS_OK = 0.7;
@@ -88,4 +108,8 @@ export function resetSherpaStats(): void {
   stats.starvedMs = 0;
   stats.lastStarvedAt = 0;
   stats.stallMs = 0;
+  stats.leveled = 0;
+  stats.levelAbsDb = 0;
+  stats.synthMs = 0;
+  stats.audioMs = 0;
 }

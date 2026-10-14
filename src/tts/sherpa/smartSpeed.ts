@@ -371,6 +371,16 @@ export function gateTailMurmur(samples: number[], sampleRate: number): number[] 
   return out;
 }
 
+// ⚠️ 반증 기록(v1.32.0 개발 중, 2026-10-14) — 「말끝 뒤 70~100ms 쉬고 나오는 짧은 덩어리」를
+// 날숨으로 보고 지우는 게이트를 만들었다가 **배포 전에 폐기**했다. 남성 화자 sid 6 문장끝의 17%
+// 에서 보이던 그 덩어리는 날숨이 아니라 **진짜 마지막 음절 「다」**였다: 「-였다/-었다/-졌다」는
+// [-얻따]로 발음돼 「다」 앞에 ㄷ 폐쇄(무음 70~100ms)가 생기고, 문장끝 「다」는 하강 억양으로
+// 반쯤 무성화돼 pyin 이 무성으로 읽는다(자기상관은 유성 0.5~1.0 — 두 판정기가 엇갈렸다).
+// 레벨도 피크 −8~−13dB 로 음절 크기였다. 지웠으면 동사 끝이 사라졌다(v1.31.0 사고와 같은 부류).
+// 교훈: **쉼 뒤 홀로 남은 소리 = 말 아님** 은 한국어에서 틀린 전제다(폐쇄음 뒤 음절). 유튜브
+// 파이프라인의 「마지막 유성 덩어리 < 80ms = 결함」 문턱도 이 화자에선 「다」의 감쇠 꼬리를
+// 세어 오탐 17% 를 냈다 — 화자·경로가 다르면 문턱을 그대로 옮기지 말 것.
+
 export function compressSilence(samples: ArrayLike<number>, sampleRate: number): CompressedAudio {
   const n = samples.length;
   const cuts = findSilenceCuts(samples, sampleRate);

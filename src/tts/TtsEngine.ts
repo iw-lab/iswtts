@@ -15,6 +15,7 @@ export type SpeakParams = {
   language?: string; // BCP-47 (예: ko-KR)
   breath?: boolean;  // 긴 문장 앞 숨소리(설정 breathSound — sherpa 만 구현, 나머지 무시)
   rubato?: boolean;  // 문장 완급 변주(설정 rubato — sherpa 만 구현, 나머지 무시)
+  stable?: boolean;  // 음성 안정화(설정 voiceStable — sherpa 만 구현: 고정 시드 + 음량 고르기)
 };
 
 export type EngineVoice = {

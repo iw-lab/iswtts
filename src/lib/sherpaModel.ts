@@ -29,7 +29,7 @@ import { extractTarBz2 } from 'react-native-sherpa-onnx/download';
 // 릴리스 자산 직링크(github.com/.../releases/download/...)는 이 제한이 없어, 직링크 다운로드
 // (expo-file-system) + 라이브러리 내장 해제기(extractTarBz2, libarchive)로 자가 관리한다.
 const MODEL_URL =
-  'https://github.com/insushim/iswtts/releases/download/tts-models/soribook-supertonic-3-hq.tar.bz2';
+  'https://github.com/iw-lab/iswtts/releases/download/tts-models/soribook-supertonic-3-hq.tar.bz2';
 export const SHERPA_MODEL_MB = 195; // 다운로드 크기(해제 후 더 큼) — UI 안내용
 // 아카이브 무결성 기준값(자가 호스팅 자산의 빌드 시 실측). 다운로드/재사용 아카이브는 해제
 // 전에 정확한 크기+MD5 를 대조한다 — ①부분/손상 파일이 "95% 크기" 휴리스틱을 통과해 해제로

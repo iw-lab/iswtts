@@ -280,5 +280,33 @@ export function normalizeForSpeech(text: string): string {
     return prev === '니' || jong === 20 ? `${prev}다` : m; // 20 = 받침 ㅆ
   });
 
+  // ⓒ 발음 교정(v1.32.0) — 유튜브 낭독 채널에서 **사람 귀로 확정된** 같은 모델(Supertonic 3)의
+  //    오독만 옮긴다(yt-video-builder supertonic_tts.py SPEECH_FIXES · tts-homophones.js).
+  //    전부 표준 발음대로 «소리만» 바꾸는 표기라 뜻이 안 바뀌고, 자막(원문)은 그대로다.
+  //    뜻이 달라질 수 있는 교체(「몇 달」→「여러 달」 등)는 남의 책이라 옮기지 않았다.
+  out = applyPronunciationFixes(out);
+
+  return out;
+}
+
+// 발음 교정 목록 — 등재 기준: 사람 귀 지적 + 표준 발음법 근거 + 뜻 불변.
+const PRONUNCIATION_FIXES: Array<[RegExp, string]> = [
+  // 文字 [문짜] — 모델은 [문자]로 읽는다(사용자 지적 2026-08-07). 앞이 한글이면 다른 낱말
+  // (주문자·전문자)이라 건드리지 않는다.
+  [/(?<![가-힣])문자/g, '문짜'],
+  // 나랏일 [나란닐] — 모델은 [나랃일](사용자 지적 2026-09-24, 쉬운 삼국지).
+  [/나랏일/g, '나란닐'],
+  // 옛이야기 [옌니야기] — 모델은 [예지야기](2026-09-25, whisper small·medium 일치).
+  [/옛이야기/g, '옌니야기'],
+  // 「성 밖」이 [썽 박]으로 된소리가 난다(사용자 지적 2026-08-03 — ASR 은 못 잡는 소리 결함).
+  // ⚠️ 홀로 선 낱말 「성」(城) + 띄어 쓴 「밖」만. 앞이 한글로 붙은 「…성」(가능성·정체성)은
+  // 다른 낱말이고, 「밖에(는·도) 없다/않다/못」(=뿐) 구문은 「바깥」으로 바꾸면 뜻이 깨진다
+  // (교차검증 codex: 「가능성 밖에는 없다」→「가능성 바깥에는 없다」).
+  [/(?<![가-힣])성 밖(?!에\s*(?:는|도)?\s*(?:없|않|안|못|모르|남지|할 수))/g, '성 바깥'],
+];
+
+export function applyPronunciationFixes(text: string): string {
+  let out = text;
+  for (const [re, to] of PRONUNCIATION_FIXES) out = out.replace(re, to);
   return out;
 }

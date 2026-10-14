@@ -264,3 +264,27 @@ describe('따옴표류 제거(v1.27.1) — 닫는 따옴표 꼬리 유성 잔향
     expect(normalizeForSpeech('〝정말 좋습니 다〞.')).toBe('정말 좋습니다.');
   });
 });
+
+describe('발음 교정(v1.32.0 — 유튜브 사람 귀 확정분)', () => {
+  const { applyPronunciationFixes } = require('../tts/sherpa/normalizeKo');
+  test.each([
+    ['한 글자, 문자 하나', '한 글자, 문짜 하나'],
+    ['나랏일을 걱정했다', '나란닐을 걱정했다'],
+    ['옛이야기를 들려주마', '옌니야기를 들려주마'],
+    ['광종 성 밖에서 기다렸다', '광종 성 바깥에서 기다렸다'],
+    ['성 밖에는 아무도 없었다', '성 바깥에는 아무도 없었다'],
+  ])('%s → %s', (a, b) => expect(applyPronunciationFixes(a)).toBe(b));
+  test.each([
+    '주문자의 이름', // 앞이 한글인 문자 = 다른 낱말
+    '가능성 밖에 없다', // 「밖에 없다」 = 뿐
+    '이길 가능성밖에 남지 않았다',
+    '성밖은 조용했다', // 붙여 쓴 건 건드리지 않는다
+    '가능성 밖에는 없다', // 교차검증 codex — 「밖에는」도 「뿐」
+    '이길 가능성 밖에도 없었다',
+    '정체성 밖으로 나갔다', // 앞이 한글로 붙은 「…성」은 낱말의 일부(성=城 아님)
+  ])('그대로: %s', (a) => expect(applyPronunciationFixes(a)).toBe(a));
+  test('normalizeForSpeech 경로에서도 적용된다', () => {
+    const { normalizeForSpeech } = require('../tts/sherpa/normalizeKo');
+    expect(normalizeForSpeech('그는 문자를 읽었다.')).toContain('문짜');
+  });
+});

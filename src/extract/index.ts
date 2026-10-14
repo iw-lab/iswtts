@@ -4,6 +4,7 @@ import type { DocFormat } from '../types';
 import { extractTxt } from './txt';
 import { extractEpub } from './epub';
 import { extractPdf } from './pdfBridge';
+import { stripMarkdown } from '../lib/markdown';
 
 // 파일 전체를 메모리(base64/문자열)에 올리는 구조라 크기 상한이 필요 — 초과 시 OOM 크래시 대신 안내.
 const MAX_SIZE: Record<string, number> = {
@@ -61,6 +62,8 @@ export async function importDocument(): Promise<ImportResult | null> {
       text = await extractEpub(asset.uri);
     } else {
       text = await extractTxt(asset.uri);
+      // 마크다운 기호(# 제목·> 인용·**강조**)를 벗긴다(v1.32.0 — lib/markdown.ts).
+      if (format === 'md') text = stripMarkdown(text);
     }
   } finally {
     // copyToCacheDirectory로 복사된 원본은 추출 후 불필요 — 대용량 누적 방지.

@@ -24,6 +24,7 @@ import { armWatchdog, disarmWatchdog, noteProgress } from '../lib/playbackWatchd
 import { sentenceGapMs } from '../lib/pacing';
 import { playGap, GAP_MIN_MS } from '../lib/gapPlayer';
 import { startBgSound, stopBgSound } from '../lib/bgSound';
+import { sleepDue } from '../lib/sleepTimer';
 
 // 재생 컨트롤러. 문장 큐를 순회하며 엔진에 발화시키고, onBoundary로 단어 하이라이트를 갱신한다.
 // epoch로 stale 콜백(정지/문장전환 후 뒤늦게 온 콜백)을 무효화한다.
@@ -73,6 +74,13 @@ export type PlayerState = {
   // 사용자에게 보여줄 일시적 알림(재생 실패·폴백 전환 등). PlayerScreen이 배너로 표시 후 지운다.
   notice: string | null;
   setNotice: (msg: string | null) => void;
+  // 취침 타이머(v1.32.0). sleepAt = 이 시각이 지나면 다음 문장으로 넘어가기 직전에 멈춘다.
+  // sleepEndOfPara = 지금 문단이 끝나면 멈춘다. ⚠️ JS 타이머로 재지 않는다 — 화면이 꺼지면 RN 이
+  // 타이머를 얼린다(v1.30.0 진범). 문장 완료는 네이티브 오디오 이벤트로 오므로 그 자리에서
+  // 시계를 본다(sleepDue). 문장 하나(수 초) 만큼 늦게 멈출 수 있는 건 의도된 오차다.
+  sleepAt: number | null;
+  sleepEndOfPara: boolean;
+  setSleep: (opt: { minutes?: number; endOfPara?: boolean } | null) => void;
 
   load: (args: {
     docId: string;
@@ -109,6 +117,7 @@ function speakParams(engineId: string, dialogue = false, gender: SpeakerGender |
     language: s.language,
     breath: engineId === 'sherpa' && s.breathSound,
     rubato: engineId === 'sherpa' && s.rubato,
+    stable: engineId === 'sherpa' && s.voiceStable,
     voiceId:
       engineId === 'edge' ? s.edgeVoiceId
       : engineId === 'sherpa' ? s.sherpaVoiceId
@@ -255,6 +264,7 @@ function maybeWarnSlowDevice(rate: number): void {
 // (CPU 지터 흡수), 온라인은 얕게(연결 낭비 방지). 각 엔진 캐시 상한(MAX_CACHE)보다 작아야
 // 재생 중 유닛 + 선행분이 캐시에서 서로를 밀어내지 않는다. 미지정 엔진은 보수적 기본(3).
 const DEFAULT_PREFETCH_UNITS = 3;
+
 
 export const usePlayer = create<PlayerState>((set, get) => {
   // 문장 사이 "쉼"(pacing.ts) 진행 상태. 쉼은 무음 재생(gapPlayer)으로 구현 — JS 타이머는
@@ -417,6 +427,18 @@ export const usePlayer = create<PlayerState>((set, get) => {
     const advanceSentence = () => {
       stallRecoveries = 0; // 문장을 온전히 끝냈다 = 파이프라인 정상
       noteProgress();
+      // 취침 타이머: 문장 경계에서만 멈춘다(말 중간에 끊지 않게). 재개는 다음 문장부터.
+      {
+        const st0 = get();
+        const nextIdx = st0.index + 1;
+        if (nextIdx < st0.sentences.length && sleepDue(st0, nextIdx)) {
+          set({ index: nextIdx, wordStart: 0, wordLen: 0, sleepAt: null, sleepEndOfPara: false });
+          if (st0.docId) useLibrary.getState().setProgress(st0.docId, nextIdx, st0.sentences.length);
+          get().pause();
+          set({ notice: '취침 타이머로 낭독을 멈췄어요. ▶ 를 누르면 이어서 읽어요.' });
+          return;
+        }
+      }
       // 폴백 없이 문장을 완주했을 때만 연속 실패 카운터 리셋(문장 단위 의미 유지).
       // 세그먼트 성공마다 리셋하면 "지문 성공 + 대사 실패" 문장에서 카운터가 매번 0으로
       // 돌아가 서킷브레이커가 영원히 안 열린다 — 교차검증 발견 2026-07-06.
@@ -620,6 +642,20 @@ export const usePlayer = create<PlayerState>((set, get) => {
     playing: false,
     notice: null,
     setNotice: (msg) => set({ notice: msg }),
+    sleepAt: null,
+    sleepEndOfPara: false,
+    setSleep: (opt) => {
+      if (!opt) {
+        set({ sleepAt: null, sleepEndOfPara: false });
+        return;
+      }
+      const minutes = opt.minutes && opt.minutes > 0 ? opt.minutes : 0;
+      set({
+        sleepAt: minutes ? Date.now() + minutes * 60_000 : null,
+        sleepEndOfPara: !!opt.endOfPara,
+      });
+      if (minutes) useSettings.getState().set({ sleepMinutes: minutes });
+    },
 
     load: ({ docId, title, sentences, paraStarts, startIndex = 0 }) => {
       clearPendingGap(false); // 새 문서 — 이전 문서의 쉼 예약은 무효
@@ -651,6 +687,9 @@ export const usePlayer = create<PlayerState>((set, get) => {
 
     play: () => {
       if (!get().sentences.length) return;
+      // 일시정지 중에 마감이 지난 타이머는 무효 — 안 지우면 ▶ 직후 첫 문장 끝에서 바로 멈춘다.
+      const sa = get().sleepAt;
+      if (sa !== null && Date.now() >= sa) set({ sleepAt: null, sleepEndOfPara: false });
       stallRecoveries = 0; // 사용자가 직접 시작 = 정체 이력 초기화
       // 첫 재생 시 1회: 배경(화면 꺼짐) 낭독이 배터리 관리에 끊기지 않도록 최적화 예외를 안내.
       promptBgReliabilityOnce();
@@ -797,6 +836,8 @@ export const usePlayer = create<PlayerState>((set, get) => {
         wordStart: 0,
         wordLen: 0,
         playing: false,
+        sleepAt: null,
+        sleepEndOfPara: false,
       });
     },
   };
