@@ -32,6 +32,7 @@ import { makeBreathSamples, speechStats, breathDurMs } from './breathWav';
 import { estimateWordBoundaries, type WordBoundary } from './align';
 import { recordSynth, recordStarvation, recordPlaybackProgress, recordLevel } from './stats';
 import { synthSeed, levelUtterance } from './voiceStable';
+import { cleanVoice, VOICE_PRESETS } from './voiceClean';
 import { subtitlesVisible, onVisibilityChange } from '../../lib/visibility';
 import { synthWaitIsNormal, SYNTH_GRACE_MS } from '../../lib/playbackWatchdog';
 
@@ -495,12 +496,14 @@ export class SherpaTtsEngine implements TtsEngine {
     // Supertonic 3 = 화자 10(sid 0~9). 라벨은 실청취로 고르게 안내(성별 메타데이터 없음).
     // 성별 라벨 = F0 자기상관 실측(2026-07-20, sid 0~4 여 172~253Hz / 5~9 남 85~151Hz —
     // speakerGender.ts 상수와 같은 근거). Supertone voice_styles F1~F5/M1~M5 명명과 일치.
-    return Array.from({ length: 10 }, (_, i) => ({
+    // v1.33.0: 유튜브에서 귀로 고르고 깨짐을 잡은 두 목소리를 맨 앞에(voiceClean.ts). id = «sid:이름» — 합성은 sid, 캐시는 id 로 갈린다.
+    const presets: EngineVoice[] = VOICE_PRESETS.map((p) => ({ id: p.id, name: p.name, language: '다국어', quality: 'neural' }));
+    return presets.concat(Array.from({ length: 10 }, (_, i) => ({
       id: String(i),
       name: `화자 ${i + 1} (${i <= 4 ? '여' : '남'})`,
       language: '다국어',
       quality: 'neural',
-    }));
+    })));
   }
 
   // 모델 삭제 전 네이티브 인스턴스 해제(파일을 쥔 채 삭제하지 않도록).
@@ -911,6 +914,9 @@ export class SherpaTtsEngine implements TtsEngine {
     // 음성 안정화 ②: 문장 음량 고르기(voiceStable.ts). 정렬(위) **뒤에** 건다 — 이득은 길이를
     // 안 바꾸지만 무음 판정 문턱이 절대값이라, 정렬을 고르기 전 파형으로 해야 하이라이트가
     // 종전과 완전히 같다.
+    // 목소리 깨짐 방지(v1.33.0, voiceClean.ts) — «6.25 여자»·«삼국지 남자» 프리셋만. 고역에만 이득을 곱해 길이 불변(정렬 위와 같은 파형 길이).
+    //    음량 고르기보다 **먼저** — 고르기가 처리 뒤 파형의 음량을 재야 목표 음량이 맞는다.
+    { const cleaned = cleanVoice(samples, sampleRate, params.voiceId); if (cleaned) samples = Array.from(cleaned); }
     if (params.stable) recordLevel(levelUtterance(samples, sampleRate).gainDb);
 
     // 네이티브 WAV 저장은 file:// 없는 절대경로, expo-audio 재생은 file:// URI.

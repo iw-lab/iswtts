@@ -25,6 +25,7 @@ import { sentenceGapMs } from '../lib/pacing';
 import { playGap, GAP_MIN_MS } from '../lib/gapPlayer';
 import { startBgSound, stopBgSound } from '../lib/bgSound';
 import { sleepDue } from '../lib/sleepTimer';
+import { presetOf, VOICE_PRESETS } from '../tts/sherpa/voiceClean';
 
 // 재생 컨트롤러. 문장 큐를 순회하며 엔진에 발화시키고, onBoundary로 단어 하이라이트를 갱신한다.
 // epoch로 stale 콜백(정지/문장전환 후 뒤늦게 온 콜백)을 무효화한다.
@@ -132,7 +133,8 @@ function speakParams(engineId: string, dialogue = false, gender: SpeakerGender |
   }
   if (engineId === 'sherpa') {
     // sid 는 0~9 만 유효 — 저장소 손상/구버전 값은 자동 대비로 폴백.
-    if (s.sherpaDialogueVoiceId && /^[0-9]$/.test(s.sherpaDialogueVoiceId)) {
+    // v1.33.0: «sid:이름» 프리셋(voiceClean.ts)도 대사 화자로 받는다 — 숫자만 받으면 고른 게 조용히 무시된다
+    if (s.sherpaDialogueVoiceId && (/^[0-9]$/.test(s.sherpaDialogueVoiceId) || presetOf(s.sherpaDialogueVoiceId))) {
       return { ...base, voiceId: s.sherpaDialogueVoiceId };
     }
     const parsed = Number.parseInt(base.voiceId || '0', 10);
@@ -149,7 +151,9 @@ function speakParams(engineId: string, dialogue = false, gender: SpeakerGender |
         ? SHERPA_MALE_SIDS
         : SHERPA_FEMALE_SIDS;
     const pick = pool.find((sid) => sid !== String(baseSid)) ?? pool[0];
-    return { ...base, voiceId: pick };
+    // 지문이 깨짐 방지 프리셋이면 대사도 같은 화자의 프리셋이 있을 때 그걸 쓴다(같은 처리로 맑게)
+    const pickPreset = presetOf(base.voiceId) ? VOICE_PRESETS.find((p) => String(p.sid) === pick) : undefined;
+    return { ...base, voiceId: pickPreset ? pickPreset.id : pick };
   }
   if (s.dialogueVoiceId) return { ...base, voiceId: s.dialogueVoiceId };
   return { ...base, pitch: Math.min(2, base.pitch * 1.25) };
