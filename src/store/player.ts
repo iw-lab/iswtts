@@ -110,6 +110,12 @@ export type PlayerState = {
 // 대비(Edge=여↔남, sherpa=기본 화자+1, 시스템=같은 음성+피치 대비).
 // ⚠️ gender 는 재생·prefetch·워밍업 세 경로 모두 같은 문장이면 같은 값이어야 한다(다르면
 // 캐시 키가 갈려 프리페치가 헛돈다) — 항상 gendersOf(sentences)[n] 로만 얻을 것.
+/** 취침 타이머가 걸려 있나(시간 또는 「문단 끝에서」). speakParams 가 호출될 땐 스토어가 이미 있다. */
+function sleepTimerOn(): boolean {
+  const p = usePlayer.getState();
+  return p.sleepAt !== null || p.sleepEndOfPara;
+}
+
 function speakParams(engineId: string, dialogue = false, gender: SpeakerGender | null = null) {
   const s = useSettings.getState();
   const base = {
@@ -119,6 +125,10 @@ function speakParams(engineId: string, dialogue = false, gender: SpeakerGender |
     breath: engineId === 'sherpa' && s.breathSound,
     rubato: engineId === 'sherpa' && s.rubato,
     stable: engineId === 'sherpa' && s.voiceStable,
+    // 절전 낭독(v1.34.0): 설정으로 켰거나 취침 타이머가 걸려 있는 동안 — 잠들려고 틀어 둔 낭독에
+    // 목소리 결보다 배터리가 먼저다. 캐시 키에 안 들어가므로(엔진 keyOf) 켜고 꺼도 이미 만든
+    // 문장은 그대로 쓰고, 새로 만드는 문장부터 바뀐다.
+    saver: engineId === 'sherpa' && (s.powerSaver || sleepTimerOn()),
     voiceId:
       engineId === 'edge' ? s.edgeVoiceId
       : engineId === 'sherpa' ? s.sherpaVoiceId

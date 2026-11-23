@@ -30,7 +30,8 @@ import { normalizeForSpeech, SPOKEN_QUOTES } from './normalizeKo';
 import { chunkForSynthesis, hasClauseComma, chunkPauseJitterMs } from './chunkKo';
 import { makeBreathSamples, speechStats, breathDurMs } from './breathWav';
 import { estimateWordBoundaries, type WordBoundary } from './align';
-import { recordSynth, recordStarvation, recordPlaybackProgress, recordLevel } from './stats';
+import { recordSynth, recordStarvation, recordPlaybackProgress, recordLevel, sherpaStats } from './stats';
+import { sherpaSteps, sherpaThreads } from './quality';
 import { synthSeed, levelUtterance } from './voiceStable';
 import { cleanVoice, VOICE_PRESETS } from './voiceClean';
 import { subtitlesVisible, onVisibilityChange } from '../../lib/visibility';
@@ -236,7 +237,8 @@ export class SherpaTtsEngine implements TtsEngine {
       // 없앤다. 미래분은 아래 prefetch 루프가 곧바로 다시 채운다. 정상 자동진행은 항상 캐시 히트라
       // 이 경로를 타지 않는다.
       this.cancelUnfinished();
-      entry = this.makeSynth(text, params);
+      // urgent: 사용자가 지금 이 문장을 기다리고 있다 — 단계를 5 로 낮춰 빨리 시작한다(doSynthesize).
+      entry = this.makeSynth(text, params, true);
     }
     this.pendingSynth = entry;
     this.pendingSynthAt = Date.now();
@@ -538,10 +540,35 @@ export class SherpaTtsEngine implements TtsEngine {
   }
 
   // ── 초기화(지연·1회) ───────────────────────────────────
+  // 합성 스레드 수(quality.ts sherpaThreads) — 모델을 올릴 때만 정해지므로 바꾸려면 다시 올린다.
+  private nativeThreads: 1 | 2 = 2;
+  private wantThreads: 1 | 2 = 2;
+  /** 1스레드로 내렸다가 버거워 되돌린 적이 있으면 이 세션에선 다시 내리지 않는다(왕복 재적재 방지). */
+  private noSingleThread = false;
+
+  // 스레드 수가 다르면 지금 인스턴스를 내리고 다시 올린다. doSynthesize(직렬 체인 안)에서만 부른다 —
+  // 같은 인스턴스로 도는 합성이 없을 때라야 destroy 가 안전하다(releaseNative 는 체인을 기다리므로
+  // 여기서 부르면 스스로를 기다리는 교착이 된다).
+  private async nativeWithThreads(threads: 1 | 2): Promise<NativeTts> {
+    const cur = this.native;
+    if (cur && this.nativeThreads !== threads) {
+      this.native = null;
+      this.initPromise = null;
+      try {
+        await cur.destroy();
+      } catch {
+        /* noop */
+      }
+    }
+    this.wantThreads = threads;
+    return this.ensureNative();
+  }
+
   private ensureNative(): Promise<NativeTts> {
     if (this.native) return Promise.resolve(this.native);
     if (this.initPromise) return this.initPromise;
     const myInitGen = this.initGen;
+    const myThreads = this.wantThreads;
     this.initPromise = (async () => {
       const path = await sherpaModelPath();
       if (!path) throw new Error('오프라인 음성 모델이 설치되지 않았습니다.');
@@ -549,7 +576,8 @@ export class SherpaTtsEngine implements TtsEngine {
       //   1스레드 0.192 / 2스레드 0.108 / 4스레드 0.113 / 6스레드 0.147
       // 2 를 넘기면 스레드 동기화 비용이 이득을 먹는다 — 늘려도 합성이 빨라지지 않으므로
       // "느리니 스레드를 더 주자"는 유혹을 여기서 차단한다(코어만 더 뺏겨 재생이 손해).
-      // ⚠️ 배터리를 아끼려고 합성 단계 수(num_steps, 기본 5)를 줄이지 말 것(v1.32.0 실측,
+      // 합성 단계 수는 문장마다 quality.ts 가 고른다(v1.34.0 — 5 가 기계음의 본체였다).
+      // ⚠️ 배터리를 아끼려고 합성 단계 수(num_steps)를 5 아래로 줄이지 말 것(v1.32.0 실측,
       // 앱 HQ 팩 · 20문장 × 화자 0/6 · 같은 시드): 잡음 척도(말하는 구간 spectral flatness
       // p95) 중앙값 5단계 0.0010 → 4단계 0.0055(5배) → 3단계 0.0111(11배), 6kHz 이상 고역비
       // 0.31% → 0.82% → 1.66%. 4단계도 같은 문장 40개 중 32개가 더 시끄러웠다. 유튜브에서
@@ -558,7 +586,7 @@ export class SherpaTtsEngine implements TtsEngine {
       const n = await createTTS({
         modelPath: { type: 'file', path },
         modelType: 'supertonic',
-        numThreads: 2,
+        numThreads: myThreads,
       });
       if (myInitGen !== this.initGen) {
         // 초기화 도중 releaseNative(모델 삭제 등)가 지나감 — 이 인스턴스를 되살리지 않는다.
@@ -566,6 +594,7 @@ export class SherpaTtsEngine implements TtsEngine {
         throw new Error('cancelled');
       }
       this.native = n;
+      this.nativeThreads = myThreads;
       return n;
     })();
     // 실패 시 다음 호출에서 재시도(모델을 방금 받았을 수도 있음).
@@ -669,7 +698,7 @@ export class SherpaTtsEngine implements TtsEngine {
     return leadPadMsFor(normalizeForSpeech(text), params.rate);
   }
 
-  private makeSynth(text: string, params: SpeakParams): CacheEntry {
+  private makeSynth(text: string, params: SpeakParams, urgent = false): CacheEntry {
     const state: SynthState = { cancelled: false, uri: null };
     const cancel = () => {
       state.cancelled = true; // 네이티브 합성은 중단 불가 — 완료 시 결과만 폐기
@@ -681,8 +710,8 @@ export class SherpaTtsEngine implements TtsEngine {
     };
     // 같은 네이티브 인스턴스에 합성이 겹치지 않게 직렬화(재생 자체는 파일이라 영향 없음).
     const promise = (this.synthChain = this.synthChain.then(
-      () => this.synthesize(text, params, state),
-      () => this.synthesize(text, params, state),
+      () => this.synthesize(text, params, state, urgent),
+      () => this.synthesize(text, params, state, urgent),
     )) as Promise<Synth>;
     return { promise, cancel };
   }
@@ -742,7 +771,7 @@ export class SherpaTtsEngine implements TtsEngine {
   // 타임아웃 래퍼 — 네이티브 hang 1건이 직렬화 체인을 영구히 막지 않게 한다.
   // 주의: 타임아웃 후에도 네이티브 호출 자체는 중단되지 않으므로(중단 API 없음) 다음 합성이
   // hang 난 호출과 겹칠 수 있다 — 영구 데드락보다 나은 차악이고, 서킷브레이커가 곧 폴백시킨다.
-  private async synthesize(text: string, params: SpeakParams, state: SynthState): Promise<Synth> {
+  private async synthesize(text: string, params: SpeakParams, state: SynthState, urgent = false): Promise<Synth> {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const timeout = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
@@ -751,15 +780,24 @@ export class SherpaTtsEngine implements TtsEngine {
       }, SYNTH_TIMEOUT_MS);
     });
     try {
-      return await Promise.race([this.doSynthesize(text, params, state), timeout]);
+      return await Promise.race([this.doSynthesize(text, params, state, urgent), timeout]);
     } finally {
       if (timer) clearTimeout(timer);
     }
   }
 
-  private async doSynthesize(text: string, params: SpeakParams, state: SynthState): Promise<Synth> {
+  private async doSynthesize(text: string, params: SpeakParams, state: SynthState, urgent = false): Promise<Synth> {
     if (state.cancelled) throw new Error('cancelled');
-    const native = await this.ensureNative();
+    // 스레드 수: 절전 낭독이고 여유가 넉넉하면 1(전기 −20%). 급한 합성(지금 들을 문장)은 재적재로
+    // 늦추지 않으려 지금 것을 그대로 쓴다.
+    let threads: 1 | 2 = this.nativeThreads;
+    if (!urgent) {
+      threads = this.noSingleThread
+        ? 2
+        : sherpaThreads(params.rate, { saver: !!params.saver, baseRtf: sherpaStats().baseRtf });
+      if (this.nativeThreads === 1 && threads === 2 && params.saver) this.noSingleThread = true;
+    }
+    const native = await this.nativeWithThreads(threads);
     if (state.cancelled) throw new Error('cancelled');
     // 모델 로드(첫 1회)는 합성 비용이 아니므로 계측 시작은 여기부터.
     const synthStart = Date.now();
@@ -808,8 +846,17 @@ export class SherpaTtsEngine implements TtsEngine {
     // dispatchGenerate(text, sid, speed)로 options(extra.lang)를 통째로 버린다(소스 실측
     // 2026-07-07) — 한국어가 영어 발음으로 깨지는 v1.6.2 버그 재발. lang 배선 패치
     // (patches/react-native-sherpa-onnx+0.4.3.patch)는 이 타임스탬프 경로에만 걸려 있다.
+    // 합성 단계 수(quality.ts — 정속 기계음의 본체가 단계 5였다는 실측과 선택 규칙). 문장 하나에
+    // 한 번 정한다(절마다 달라지면 한 문장 안에서 결이 바뀐다). 캐시 키에는 넣지 않는다 —
+    // 기기 여유(baseRtf)에 따라 선행 합성 때와 재생 때 값이 달라질 수 있고, 키가 갈리면 애써
+    // 만든 파일을 버리고 다시 합성한다(끊김 + 전기 낭비). 단계가 달라도 같은 문장·같은 시드·같은
+    // 길이의 같은 목소리라, 이미 만든 파일은 그대로 쓰는 게 옳다.
+    // urgent(캐시에 없는 문장을 지금 당장 들려줘야 할 때 — 재생 버튼·건너뛰기 직후)는 5단계로 만든다:
+    // 침묵이 1.56배 길어지는 것보다 그 한 문장의 결을 양보하는 쪽이 낫다. 뒤따르는 선행 합성부터 정식.
+    const steps = sherpaSteps(params.rate, { saver: !!params.saver || urgent, baseRtf: sherpaStats().baseRtf });
     const gen = async (input: string): Promise<{ samples: ArrayLike<number>; sampleRate: number }> => {
       const audio = await native.generateSpeechWithTimestamps(input, {
+        numSteps: steps,
         sid: Number.parseInt(params.voiceId || '0', 10) || 0,
         // v1.26.1: 합성 speed 는 "순수" 배속 분담(sherpaModelSpeed)만. 템포 평준화·루바토는
         // 모델 speed 가 F0(음높이)까지 바꾼다는 실측(0.90 → +10Hz, tone_probe EXP2 — 문장마다
@@ -940,7 +987,7 @@ export class SherpaTtsEngine implements TtsEngine {
     //    문장마다 앞뒤 무음(~0.9s)만큼 분모가 부풀어 RTF 가 낙관적으로 기록되고, 못 따라가는
     //    기기를 정상으로 오판한다(교차검증 지적 2026-07-13 — 계측을 저장 뒤로 옮기며 유입됨).
     // 불변식: rtf × 설정배속 ≥ 1 이면 재생이 준비를 앞질러 캐시가 마른다.
-    recordSynth(Date.now() - synthStart, (samples.length / sampleRate) * 1000);
+    recordSynth(Date.now() - synthStart, (samples.length / sampleRate) * 1000, steps, this.nativeThreads);
     // 완급 인자(재생 스트레치용) — 음절 산정은 정규화 "후"(spoken) 기준(숫자·기호 많은
     // 원문은 실제 발화가 훨씬 길어 원문 기준이면 짧은 문장으로 오판, 교차검증 2026-07-19).
     // 루바토 해시는 원문(text) 기준 — pacing.ts afterRubato(재생부)와 같은 입력이어야

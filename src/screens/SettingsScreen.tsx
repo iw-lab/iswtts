@@ -507,6 +507,14 @@ export default function SettingsScreen({ navigation }: Props) {
               />
               <Divider />
               <SwitchRow
+                icon="moon"
+                label="절전 낭독"
+                hint="배터리를 덜 씁니다 — 목소리를 만드는 계산을 약 3분의 1 줄입니다. 목소리 결은 조금 덜 자연스러워져요. 취침 타이머를 켜면 그동안은 자동으로 절전입니다. (2배속 초과는 원래 절전과 같습니다)"
+                value={s.powerSaver}
+                onChange={(v) => s.set({ powerSaver: v })}
+              />
+              <Divider />
+              <SwitchRow
                 label="문장 숨소리"
                 hint="사람 낭독자처럼 긴 문장의 절 사이와 문단이 바뀔 때 살짝 숨을 들이쉬어요. (3배속 이하)"
                 value={s.breathSound}
@@ -629,7 +637,7 @@ export default function SettingsScreen({ navigation }: Props) {
             <View style={{ flex: 1 }}>
               <Text style={[styles.label, { color: p.text, marginTop: 0 }]}>배터리를 아끼는 법</Text>
               <Text style={[styles.battTxt, { color: p.subtext }]}>
-                · 화면은 꺼 두세요 — 화면이 가장 큰 소모원이에요(낭독은 계속됩니다){'\n'}· 테마를 「검정(절전)」으로{'\n'}· 잠들 땐 플레이어의 🌙 취침 타이머{'\n'}· 고품질 오프라인은 기기 안에서 목소리를 만들어 CPU 를 씁니다 — 배속이 높을수록 더 써요
+                · 화면은 꺼 두세요 — 화면이 가장 큰 소모원이에요(낭독은 계속됩니다){'\n'}· 테마를 「검정(절전)」으로{'\n'}· 잠들 땐 플레이어의 🌙 취침 타이머 — 켜 두는 동안 자동으로 「절전 낭독」이 됩니다{'\n'}· 고품질 오프라인은 기기 안에서 목소리를 만들어 CPU 를 씁니다 — 배속이 높을수록 더 써요
               </Text>
             </View>
           </View>
@@ -637,7 +645,7 @@ export default function SettingsScreen({ navigation }: Props) {
             <>
               <Divider />
               <Text style={[styles.diag, { color: p.subtext }]}>
-                진단 · 음성 준비 속도 {diag.avgRtf.toFixed(2)} (지금 {s.rate}×에서는 {(1 / s.rate).toFixed(2)} 아래여야 안 끊깁니다)
+                진단 · 음성 준비 속도 {diag.avgRtf.toFixed(2)}{diag.lastSteps ? ` · 합성 ${diag.lastSteps}단계${diag.lastThreads === 1 ? '·1스레드' : ''}` : ''} (지금 {s.rate}×에서는 {(1 / s.rate).toFixed(2)} 아래여야 안 끊깁니다)
                 {synthShare !== null && `\n· 낭독 1분을 만드는 데 CPU ${Math.round(synthShare * 60)}초`}
                 {`\n· 다음 문장을 기다린 시간 ${(diag.starvedMs / 1000).toFixed(1)}초 (${diag.starved}회)`}
                 {`\n· 재생이 끊긴 시간 ${(diag.stallMs / 1000).toFixed(1)}초`}

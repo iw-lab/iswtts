@@ -36,6 +36,10 @@ export type SettingsState = {
   // 음성 안정화(v1.32.0, 기본 켜짐): 문장별 고정 시드(같은 문장 = 같은 목소리) + 문장 음량
   // 고르기 + 말끝 결함 감지 시 1회 재합성. 근거·실측은 tts/sherpa/voiceStable.ts.
   voiceStable: boolean;
+  // 절전 낭독(v1.34.0, 기본 꺼짐): 오프라인 고품질 음성의 합성 단계를 5 로 낮춘다 — 합성 CPU 가
+  // 정속 기준 약 36% 줄고(8단계 대비) 목소리는 v1.33 과 같아진다. 취침 타이머가 켜져 있는 동안은
+  // 이 값과 무관하게 자동으로 절전이다(player.ts speakParams). 근거 tts/sherpa/quality.ts.
+  powerSaver: boolean;
   sleepMinutes: number; // 마지막으로 고른 취침 타이머(분) — 다음에 기본값으로 제안
   set: (patch: Partial<SettingsState>) => void;
 };
@@ -64,6 +68,7 @@ export const useSettings = create<SettingsState>()(
       themeMode: 'system',
       keepAwake: false,
       voiceStable: true,
+      powerSaver: false,
       sleepMinutes: 30,
       // 스토어 레벨 방어 클램프 — 어떤 호출부에서도 범위를 벗어난 값이 엔진까지 흐르지 않게.
       set: (patch) => {
@@ -98,6 +103,7 @@ export const useSettings = create<SettingsState>()(
         themeMode: s.themeMode,
         keepAwake: s.keepAwake,
         voiceStable: s.voiceStable,
+        powerSaver: s.powerSaver,
         sleepMinutes: s.sleepMinutes,
       }),
     },

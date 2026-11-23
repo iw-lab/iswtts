@@ -18,8 +18,9 @@ import { extractTarBz2 } from 'react-native-sherpa-onnx/download';
 // 왜(2026-07-15 실측): int8 보코더가 청감 노이즈의 주범 — 무음 구간 플로어 −82dB 가 fp32
 // 보코더로 −97dB(−15dB, 반복 실측). RTF 는 0.101→0.104 로 동일(보코더는 스텝 수와 무관한
 // 1패스라 비용이 거의 없음) = 배속 파이프라인 예산 무손상. vector_estimator 까지 fp32 로
-// 올리면 +178MB 에 이득 ~1dB 뿐이라 제외. num_steps(기본 5) 상향도 fp32 보코더 앞에서는
-// 이득 0 이라 불채택 — 과거 "steps 8 개선" 실측은 int8 보코더 노이즈를 가린 것이었다.
+// 올리면 +178MB 에 이득 ~1dB 뿐이라 제외(UTMOS 로도 +0.07 — 2026-11-23 재확인).
+// ⚠️ 정정(v1.34.0): 여기 적혀 있던 "num_steps 상향은 이득 0" 은 **무음 구간 잡음 바닥**만 본
+// 결론이었다. 말소리의 자연스러움(UTMOS·NISQA)으로 재면 5→8단계가 +0.35 다 — tts/sherpa/quality.ts.
 // 팩 출처: k2-fsa int8 배포본 + Supertone/supertonic-3(HF) fp32 vocoder.onnx 교체,
 // iswtts 릴리스 고정 태그(tts-models)에 자가 호스팅.
 //

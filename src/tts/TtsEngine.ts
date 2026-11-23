@@ -16,6 +16,7 @@ export type SpeakParams = {
   breath?: boolean;  // 긴 문장 앞 숨소리(설정 breathSound — sherpa 만 구현, 나머지 무시)
   rubato?: boolean;  // 문장 완급 변주(설정 rubato — sherpa 만 구현, 나머지 무시)
   stable?: boolean;  // 음성 안정화(설정 voiceStable — sherpa 만 구현: 고정 시드 + 음량 고르기)
+  saver?: boolean;   // 절전 낭독(설정 powerSaver · 취침 타이머 동안 자동 — sherpa 만 구현: 합성 단계 5, quality.ts)
 };
 
 export type EngineVoice = {

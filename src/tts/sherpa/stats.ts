@@ -7,6 +7,8 @@
 // 개발 PC 에서는 재현되지 않는다(맥 RTF 0.11 — 안드로이드 중급기 추정 0.5~1.1).
 // → 기기가 스스로 재고, 설정 화면에 보여주고, 못 따라가면 사용자에게 알린다.
 
+import { stepCost, THREAD1_COST } from './quality';
+
 export type SherpaStats = {
   /** 합성 완료 건수 */
   synths: number;
@@ -32,6 +34,16 @@ export type SherpaStats = {
   synthMs: number;
   /** 합성된 오디오 누계(ms) */
   audioMs: number;
+  /**
+   * 이 기기의 「5단계 환산」 합성 RTF(EWMA) — 실제 RTF 를 그때 쓴 단계의 비용으로 나눈 값.
+   * 단계 수를 고르는 근거(quality.ts sherpaSteps). 단계를 바꿔도 같은 기기면 같은 값이라
+   * 「8단계로 올렸더니 느려졌다 → 내린다 → 빨라졌다 → 올린다」 진동이 없다. 표본 전엔 null.
+   */
+  baseRtf: number | null;
+  /** 마지막 합성에 쓴 단계 수(진단 표시) */
+  lastSteps: number;
+  /** 마지막 합성의 스레드 수(진단 표시). */
+  lastThreads: number;
 };
 
 const stats: SherpaStats = {
@@ -45,6 +57,9 @@ const stats: SherpaStats = {
   levelAbsDb: 0,
   synthMs: 0,
   audioMs: 0,
+  baseRtf: null,
+  lastSteps: 0,
+  lastThreads: 0,
 };
 
 // 최근 성능에 반응하는 지수가중이동평균(EWMA). 단순 누적평균이면 표본이 쌓일수록 최근 건의
@@ -52,9 +67,17 @@ const stats: SherpaStats = {
 // 실제로 겪는 순간)을 못 잡는다(교차검증 지적 2026-07-13). α=0.3 ≈ 최근 ~6건 반영.
 const RTF_ALPHA = 0.3;
 
-export function recordSynth(elapsedMs: number, audioMs: number): void {
+/** steps = 이 합성에 쓴 단계 수. 모델을 안 부른 기록(무음 발화)은 생략 — 환산 RTF 를 안 건드린다. */
+export function recordSynth(elapsedMs: number, audioMs: number, steps?: number, threads: number = 2): void {
   if (!(audioMs > 0) || !(elapsedMs >= 0)) return;
   const rtf = elapsedMs / audioMs;
+  if (steps !== undefined && steps > 0) {
+    // 2스레드·5단계 환산 — 1스레드로 만든 표본은 그 비용으로 나눠 같은 자로 잰다.
+    const base = rtf / stepCost(steps) / (threads === 1 ? THREAD1_COST : 1);
+    stats.baseRtf = stats.baseRtf === null ? base : stats.baseRtf + RTF_ALPHA * (base - stats.baseRtf);
+    stats.lastSteps = steps;
+    stats.lastThreads = threads;
+  }
   stats.avgRtf = stats.synths === 0 ? rtf : stats.avgRtf + RTF_ALPHA * (rtf - stats.avgRtf);
   stats.synths += 1;
   stats.synthMs += elapsedMs;
@@ -112,4 +135,7 @@ export function resetSherpaStats(): void {
   stats.levelAbsDb = 0;
   stats.synthMs = 0;
   stats.audioMs = 0;
+  stats.baseRtf = null;
+  stats.lastSteps = 0;
+  stats.lastThreads = 0;
 }
